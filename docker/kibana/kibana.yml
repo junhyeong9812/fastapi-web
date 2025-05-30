@@ -1,0 +1,143 @@
+# docker/kibana/kibana.yml
+# Kibana 설정 파일 (한국어 지원)
+
+# ==========================================
+# 서버 설정
+# ==========================================
+server.name: "kibana-fastapi"
+server.host: "0.0.0.0"
+server.port: 5601
+server.basePath: ""
+server.rewriteBasePath: false
+
+# ==========================================
+# Elasticsearch 연결 설정
+# ==========================================
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+elasticsearch.username: ""
+elasticsearch.password: ""
+elasticsearch.requestTimeout: 30000
+elasticsearch.pingTimeout: 3000
+
+# ==========================================
+# 한국어 지원 설정
+# ==========================================
+i18n.locale: "ko-KR"
+
+# ==========================================
+# 로깅 설정
+# ==========================================
+logging.appenders:
+  default:
+    type: console
+    layout:
+      type: pattern
+      pattern: "[%date{ISO8601}][%level][%logger] %message"
+  file:
+    type: file
+    fileName: /usr/share/kibana/logs/kibana.log
+    layout:
+      type: json
+
+logging.root:
+  level: info
+  appenders:
+    - default
+    - file
+
+logging.loggers:
+  - name: plugins.security
+    level: info
+  - name: elasticsearch.query
+    level: warn
+
+# ==========================================
+# 모니터링 설정
+# ==========================================
+monitoring.enabled: false
+monitoring.kibana.collection.enabled: false
+
+# ==========================================
+# 보안 설정 (개발환경)
+# ==========================================
+xpack.security.enabled: false
+xpack.encryptedSavedObjects.encryptionKey: "something_at_least_32_characters_long_for_encryption"
+xpack.reporting.encryptionKey: "something_at_least_32_characters_long_for_reporting"
+xpack.screenshotting.browser.chromium.disableSandbox: true
+
+# ==========================================
+# 대시보드 및 시각화 설정
+# ==========================================
+kibana.index: ".kibana"
+kibana.defaultAppId: "dashboard"
+
+# ==========================================
+# 맵 설정 (한국 지역)
+# ==========================================
+map.includeElasticMapsService: true
+map.tilemap.url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+map.tilemap.options.attribution: "© OpenStreetMap contributors"
+map.regionmap:
+  includeElasticMapsService: true
+  layers:
+    - name: "South Korea Provinces"
+      url: "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2018/json/skorea-provinces-2018-geo.json"
+      attribution: "Korea Statistics"
+      fields:
+        - name: "name"
+          description: "Province name"
+        - name: "name_eng" 
+          description: "Province name in English"
+
+# ==========================================
+# 데이터 뷰 설정
+# ==========================================
+data.search.aggs.shardDelay.enabled: true
+data.search.sessions.enabled: true
+
+# ==========================================
+# 커스텀 설정
+# ==========================================
+# 한국어 데이터 처리를 위한 추가 설정
+newsfeed.enabled: false
+telemetry.enabled: false
+telemetry.optIn: false
+
+# ==========================================
+# 개발환경 설정
+# ==========================================
+server.publicBaseUrl: "http://localhost:5601"
+elasticsearch.requestHeadersWhitelist: ["authorization", "content-type"]
+
+# ==========================================
+# 성능 최적화
+# ==========================================
+server.maxPayloadBytes: 1048576
+elasticsearch.shardTimeout: 30000
+elasticsearch.requestTimeout: 30000
+
+# ==========================================
+# 사용자 정의 인덱스 패턴
+# ==========================================
+# 이 설정들은 Kibana UI에서 수동으로 생성하거나
+# 스크립트를 통해 자동으로 생성할 수 있습니다:
+#
+# 권장 인덱스 패턴:
+# - products-*: 상품 데이터
+# - search-logs-*: 검색 로그
+# - user-activities-*: 사용자 활동
+# - system-logs-*: 시스템 로그
+#
+# 시간 필드 설정:
+# - @timestamp: 일반적인 타임스탬프
+# - created_at: 생성일시
+# - updated_at: 수정일시
+
+# ==========================================
+# 대시보드 자동 로드 설정
+# ==========================================
+# 초기 대시보드와 시각화를 자동으로 로드하려면
+# saved_objects 디렉토리에 JSON 파일들을 배치하고
+# 다음 설정을 활성화할 수 있습니다:
+#
+# kibana.savedObjectsPermission.enabled: true

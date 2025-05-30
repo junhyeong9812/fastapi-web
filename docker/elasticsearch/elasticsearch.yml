@@ -1,0 +1,151 @@
+# docker/elasticsearch/elasticsearch.yml
+# Elasticsearch 기본 설정 파일 (노리 분석기는 인덱스 매핑에서 정의)
+
+# ==========================================
+# 클러스터 설정
+# ==========================================
+cluster.name: "fastapi-elasticsearch-cluster"
+node.name: "fastapi-node-1"
+node.master: true
+node.data: true
+node.ingest: true
+
+# ==========================================
+# 네트워크 설정
+# ==========================================
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# ==========================================
+# 디스커버리 설정 (단일 노드)
+# ==========================================
+discovery.type: single-node
+cluster.initial_master_nodes: ["fastapi-node-1"]
+
+# ==========================================
+# 메모리 및 성능 설정
+# ==========================================
+bootstrap.memory_lock: false
+indices.memory.index_buffer_size: 20%
+indices.memory.min_index_buffer_size: 48mb
+
+# ==========================================
+# 인덱스 기본 설정
+# ==========================================
+index:
+  number_of_shards: 1
+  number_of_replicas: 0
+  max_result_window: 50000
+
+# ==========================================
+# 로깅 설정
+# ==========================================
+logger.level: INFO
+logger.org.elasticsearch.discovery: WARN
+
+# ==========================================
+# 보안 설정 (개발환경)
+# ==========================================
+xpack.security.enabled: false
+xpack.monitoring.collection.enabled: false
+xpack.graph.enabled: false
+xpack.watcher.enabled: false
+xpack.ml.enabled: false
+
+# ==========================================
+# HTTP 설정
+# ==========================================
+http.cors.enabled: true
+http.cors.allow-origin: "*"
+http.cors.allow-methods: OPTIONS, HEAD, GET, POST, PUT, DELETE
+http.cors.allow-headers: X-Requested-With, Content-Type, Content-Length, Authorization
+
+# ==========================================
+# 경로 설정
+# ==========================================
+path.data: /usr/share/elasticsearch/data
+path.logs: /usr/share/elasticsearch/logs
+
+# ==========================================
+# 스레드 풀 설정
+# ==========================================
+thread_pool.search.size: 4
+thread_pool.search.queue_size: 1000
+thread_pool.index.size: 4
+thread_pool.index.queue_size: 200
+
+# ==========================================
+# 압축 설정
+# ==========================================
+index.codec: best_compression
+
+# ==========================================
+# 검색 설정
+# ==========================================
+search.max_buckets: 65536
+indices.query.bool.max_clause_count: 4096
+# ==========================================
+# 노리 분석기 관련 설정
+# ==========================================
+# 노리 분석기는 플러그인으로 설치되며,
+# 실제 분석기 설정은 인덱스 생성 시 매핑에서 정의합니다.
+#
+# 예시 매핑 (FastAPI 애플리케이션에서 생성):
+#
+# PUT /trademarks
+# {
+#   "settings": {
+#     "analysis": {
+#       "analyzer": {
+#         "korean_analyzer": {
+#           "type": "nori",
+#           "tokenizer": "nori_tokenizer",
+#           "filter": ["nori_part_of_speech", "lowercase", "nori_readingform"]
+#         },
+#         "korean_search_analyzer": {
+#           "type": "nori",
+#           "tokenizer": "nori_tokenizer",
+#           "filter": ["nori_part_of_speech", "lowercase", "synonym_filter"]
+#         }
+#       },
+#       "tokenizer": {
+#         "nori_tokenizer": {
+#           "type": "nori_tokenizer",
+#           "decompound_mode": "mixed",
+#           "user_dictionary_rules": [
+#             "갤럭시,갤럭시,갤럭시,NNG",
+#             "아이폰,아이폰,아이폰,NNG"
+#           ]
+#         }
+#       },
+#       "filter": {
+#         "synonym_filter": {
+#           "type": "synonym",
+#           "synonyms": [
+#             "스마트폰,휴대폰,핸드폰,폰",
+#             "노트북,랩톱,컴퓨터"
+#           ]
+#         }
+#       }
+#     }
+#   },
+#   "mappings": {
+#     "properties": {
+#       "product_name": {
+#         "type": "text",
+#         "analyzer": "korean_analyzer",
+#         "search_analyzer": "korean_search_analyzer",
+#         "fields": {
+#           "keyword": {
+#             "type": "keyword"
+#           }
+#         }
+#       },
+#       "product_name_eng": {
+#         "type": "text",
+#         "analyzer": "standard"
+#       }
+#     }
+#   }
+# }

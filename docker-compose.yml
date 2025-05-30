@@ -1,79 +1,34 @@
+# docker-compose.yml
+# 데이터베이스만 구동하는 메인 Docker Compose 파일
+
 version: "3.8"
 
 services:
   # ==========================================
-  # Elasticsearch (검색 엔진)
-  # ==========================================
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
-    container_name: elasticsearch
-    environment:
-      - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-      - xpack.security.enabled=false
-      - xpack.monitoring.collection.enabled=false
-      - cluster.name=fastapi-cluster
-      - node.name=fastapi-node
-    volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-      - ./docker/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
-    ports:
-      - "9200:9200"
-      - "9300:9300"
-    networks:
-      - fastapi-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # ==========================================
-  # Kibana (Elasticsearch 시각화)
-  # ==========================================
-  kibana:
-    image: docker.elastic.co/kibana/kibana:7.17.9
-    container_name: kibana
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-      - SERVER_NAME=kibana
-      - SERVER_HOST=0.0.0.0
-    volumes:
-      - ./docker/kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
-    ports:
-      - "5601:5601"
-    networks:
-      - fastapi-network
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # ==========================================
   # MariaDB (관계형 데이터베이스)
   # ==========================================
   mariadb:
-    image: mariadb:10.11
-    container_name: mariadb
+    build:
+      context: ./docker/mariadb
+      dockerfile: Dockerfile
+    container_name: fastapi-mariadb
     environment:
-      - MYSQL_ROOT_PASSWORD=rootpassword
+      - MYSQL_ROOT_PASSWORD=fastapi_root_2024
       - MYSQL_DATABASE=fastapi_db
       - MYSQL_USER=fastapi_user
-      - MYSQL_PASSWORD=fastapi_password
+      - MYSQL_PASSWORD=fastapi_pass_2024
       - MYSQL_CHARACTER_SET_SERVER=utf8mb4
       - MYSQL_COLLATION_SERVER=utf8mb4_unicode_ci
     volumes:
       - mariadb_data:/var/lib/mysql
-      - ./docker/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mariadb_logs:/var/log/mysql
       - ./docker/mariadb/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+      - ./docker/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "3306:3306"
     networks:
       - fastapi-network
+    restart: unless-stopped
     healthcheck:
       test:
         [
@@ -84,84 +39,208 @@ services:
           "localhost",
           "-u",
           "root",
-          "-prootpassword",
+          "-pfastapi_root_2024",
         ]
       interval: 30s
       timeout: 10s
       retries: 5
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+      start_period: 60s
 
   # ==========================================
   # MongoDB (문서형 데이터베이스)
   # ==========================================
   mongodb:
-    image: mongo:7.0
-    container_name: mongodb
+    build:
+      context: ./docker/mongodb
+      dockerfile: Dockerfile
+    container_name: fastapi-mongodb
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=adminpassword
+      - MONGO_INITDB_ROOT_USERNAME=fastapi_admin
+      - MONGO_INITDB_ROOT_PASSWORD=fastapi_mongo_2024
       - MONGO_INITDB_DATABASE=fastapi_db
     volumes:
       - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+      - mongodb_logs:/var/log/mongodb
       - ./docker/mongodb/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     ports:
       - "27017:27017"
     networks:
       - fastapi-network
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s
 
   # ==========================================
-  # Redis (캐싱 및 세션 저장소)
+  # Elasticsearch (검색 엔진)
   # ==========================================
-  redis:
-    image: redis:7.2-alpine
-    container_name: redis
-    ports:
-      - "6379:6379"
+  elasticsearch:
+    build:
+      context: ./docker/elasticsearch
+      dockerfile: Dockerfile
+    container_name: fastapi-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - xpack.security.enabled=false
+      - xpack.monitoring.collection.enabled=false
+      - cluster.name=fastapi-es-cluster
+      - node.name=fastapi-es-node
+      - bootstrap.memory_lock=true
     volumes:
-      - redis_data:/data
+      - elasticsearch_data:/usr/share/elasticsearch/data
+      - elasticsearch_logs:/usr/share/elasticsearch/logs
+      - ./docker/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    ports:
+      - "9200:9200"
+      - "9300:9300"
     networks:
       - fastapi-network
+    restart: unless-stopped
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
-    command: redis-server --appendonly yes
+      start_period: 60s
 
   # ==========================================
-  # FastAPI 애플리케이션 (선택적)
+  # Kibana (Elasticsearch 대시보드)
   # ==========================================
-  fastapi-app:
+  kibana:
     build:
-      context: .
+      context: ./docker/kibana
       dockerfile: Dockerfile
-    container_name: fastapi-app
+    container_name: fastapi-kibana
     environment:
-      - DATABASE_URL=mysql+aiomysql://fastapi_user:fastapi_password@mariadb:3306/fastapi_db
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - MONGODB_URL=mongodb://admin:adminpassword@mongodb:27017/fastapi_db?authSource=admin
-      - REDIS_URL=redis://redis:6379
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=fastapi-kibana
+      - SERVER_HOST=0.0.0.0
+      - I18N_LOCALE=ko-KR
+    volumes:
+      - kibana_data:/usr/share/kibana/data
+      - kibana_logs:/usr/share/kibana/logs
+      - ./docker/kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
     ports:
-      - "8000:8000"
+      - "5601:5601"
+    networks:
+      - fastapi-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ==========================================
+  # Redis (캐시 및 세션 저장소)
+  # ==========================================
+  redis:
+    build:
+      context: ./docker/redis
+      dockerfile: Dockerfile
+    container_name: fastapi-redis
+    environment:
+      - REDIS_PASSWORD=fastapi_redis_2024
+    volumes:
+      - redis_data:/data
+      - redis_logs:/var/log/redis
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "6379:6379"
+    networks:
+      - fastapi-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "--no-auth-warning",
+          "-a",
+          "fastapi_redis_2024",
+          "ping",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ==========================================
+  # 데이터베이스 관리 도구들 (선택적)
+  # ==========================================
+
+  # phpMyAdmin (MariaDB 관리)
+  phpmyadmin:
+    image: phpmyadmin:5.2
+    container_name: fastapi-phpmyadmin
+    environment:
+      - PMA_HOST=mariadb
+      - PMA_PORT=3306
+      - PMA_USER=fastapi_user
+      - PMA_PASSWORD=fastapi_pass_2024
+      - UPLOAD_LIMIT=2G
+    ports:
+      - "8080:80"
     networks:
       - fastapi-network
     depends_on:
       mariadb:
         condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
+    restart: unless-stopped
+
+  # Mongo Express (MongoDB 관리)
+  mongo-express:
+    image: mongo-express:1.0
+    container_name: fastapi-mongo-express
+    environment:
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=fastapi_admin
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=fastapi_mongo_2024
+      - ME_CONFIG_MONGODB_URL=mongodb://fastapi_admin:fastapi_mongo_2024@mongodb:27017/
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=admin123
+    ports:
+      - "8081:8081"
+    networks:
+      - fastapi-network
+    depends_on:
       mongodb:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./app:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  # Redis Commander (Redis 관리)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: fastapi-redis-commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:fastapi_redis_2024
+      - HTTP_USER=admin
+      - HTTP_PASSWORD=admin123
+    ports:
+      - "8082:8081"
+    networks:
+      - fastapi-network
+    depends_on:
+      - redis
+    restart: unless-stopped
 
 # ==========================================
 # 네트워크 설정
@@ -172,16 +251,34 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
 
 # ==========================================
 # 볼륨 설정
 # ==========================================
 volumes:
-  elasticsearch_data:
-    driver: local
+  # 데이터 볼륨
   mariadb_data:
     driver: local
   mongodb_data:
     driver: local
+  mongodb_config:
+    driver: local
+  elasticsearch_data:
+    driver: local
   redis_data:
+    driver: local
+  kibana_data:
+    driver: local
+
+  # 로그 볼륨
+  mariadb_logs:
+    driver: local
+  mongodb_logs:
+    driver: local
+  elasticsearch_logs:
+    driver: local
+  kibana_logs:
+    driver: local
+  redis_logs:
     driver: local
