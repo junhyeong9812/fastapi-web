@@ -1,82 +1,130 @@
-# app/core/database/mariadb.py
+# core/database/mariadb.py
 """
 MariaDB 연결 및 세션 관리
-SQLAlchemy 기반 비동기 연결 구현
+SQLAlchemy async 엔진과 세션 관리
 """
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import declarative_base
-from sqlalchemy import text
-from typing import AsyncGenerator
 import logging
+from typing import AsyncGenerator, Optional
+from contextlib import asynccontextmanager
+
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from config.settings import settings
 
-# 로거 설정
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# SQLAlchemy 설정
-# ==========================================
 
-# 베이스 모델 클래스
-Base = declarative_base()
+# ===========================================
+# SQLAlchemy 기본 모델 클래스
+# ===========================================
+class Base(DeclarativeBase):
+    """SQLAlchemy 기본 모델 클래스"""
+    pass
 
-# 비동기 엔진 생성
-async_engine = create_async_engine(
-    settings.MARIADB_URL,
-    # 연결 풀 설정
-    pool_size=settings.MARIADB_POOL_SIZE,
-    max_overflow=settings.MARIADB_MAX_OVERFLOW,
-    pool_timeout=settings.MARIADB_POOL_TIMEOUT,
-    pool_recycle=settings.MARIADB_POOL_RECYCLE,
+
+# ===========================================
+# 전역 변수들
+# ===========================================
+mariadb_engine = None
+AsyncSessionLocal = None
+
+
+# ===========================================
+# MariaDB 초기화 및 종료
+# ===========================================
+async def init_mariadb():
+    """MariaDB 연결 초기화"""
+    global mariadb_engine, AsyncSessionLocal
     
-    # 연결 관리 설정
-    pool_pre_ping=True,  # 연결 유효성 사전 검사
-    pool_reset_on_return='commit',  # 연결 반환 시 커밋
+    try:
+        logger.info(f"MariaDB 연결 시도: {settings.MARIADB_HOST}:{settings.MARIADB_PORT}")
+        
+        # 엔진 생성
+        mariadb_engine = create_async_engine(
+            settings.MARIADB_URI,
+            pool_size=settings.MARIADB_POOL_SIZE,
+            max_overflow=settings.MARIADB_MAX_OVERFLOW,
+            pool_timeout=settings.MARIADB_POOL_TIMEOUT,
+            pool_recycle=settings.MARIADB_POOL_RECYCLE,
+            pool_pre_ping=True,  # 연결 상태 자동 확인
+            echo=settings.DEBUG,  # SQL 쿼리 로깅 (개발환경에서만)
+            future=True,
+        )
+        
+        # 세션 팩토리 생성
+        AsyncSessionLocal = async_sessionmaker(
+            bind=mariadb_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+            autocommit=False,
+        )
+        
+        # 연결 테스트
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text("SELECT 1 as test"))
+            test_value = result.scalar()
+            if test_value != 1:
+                raise Exception("연결 테스트 실패")
+        
+        logger.info("✅ MariaDB 연결 및 초기화 완료")
+        
+        # 개발환경에서는 추가 정보 로깅
+        if settings.DEBUG:
+            logger.debug(f"연결 풀 크기: {settings.MARIADB_POOL_SIZE}")
+            logger.debug(f"최대 오버플로우: {settings.MARIADB_MAX_OVERFLOW}")
+            logger.debug(f"데이터베이스: {settings.MARIADB_DATABASE}")
+        
+    except Exception as e:
+        logger.error(f"❌ MariaDB 초기화 실패: {e}")
+        # 엔진이 생성되었다면 정리
+        if mariadb_engine:
+            await mariadb_engine.dispose()
+            mariadb_engine = None
+        raise
+
+
+async def close_mariadb():
+    """MariaDB 연결 종료"""
+    global mariadb_engine, AsyncSessionLocal
     
-    # 로깅 설정 (개발환경에서만)
-    echo=settings.DEBUG,  # SQL 쿼리 로그
-    echo_pool=settings.DEBUG,  # 연결 풀 로그
-    
-    # SQLAlchemy 2.0 스타일 사용
-    future=True,
-    
-    # 연결 파라미터
-    connect_args={
-        "charset": "utf8mb4",
-        "collation": "utf8mb4_unicode_ci",
-        "autocommit": False,
-        "init_command": "SET time_zone='+09:00'"  # 한국 시간대
-    }
-)
-
-# 세션 팩토리 생성
-AsyncSessionLocal = async_sessionmaker(
-    bind=async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,  # 커밋 후에도 객체 접근 가능
-    autoflush=True,  # 자동 플러시
-    autocommit=False  # 명시적 커밋
-)
+    try:
+        if mariadb_engine:
+            # 모든 연결 정리
+            await mariadb_engine.dispose()
+            logger.info("✅ MariaDB 연결 종료 완료")
+        
+        # 전역 변수 초기화
+        mariadb_engine = None
+        AsyncSessionLocal = None
+        
+    except Exception as e:
+        logger.error(f"❌ MariaDB 연결 종료 중 오류: {e}")
+        raise
 
 
-# ==========================================
-# 세션 관리 함수들
-# ==========================================
-
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+# ===========================================
+# 세션 관리
+# ===========================================
+async def get_mariadb_session() -> AsyncGenerator[AsyncSession, None]:
     """
-    MariaDB 세션 의존성 주입용 함수
-    FastAPI 의존성으로 사용
+    MariaDB 세션 의존성 주입용 제너레이터
+    FastAPI dependency로 사용
     """
+    if not AsyncSessionLocal:
+        raise RuntimeError("MariaDB가 초기화되지 않았습니다. init_mariadb()를 먼저 호출하세요.")
+    
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            # 성공 시 자동 커밋
+            # 트랜잭션 커밋
             await session.commit()
         except Exception as e:
-            # 에러 시 롤백
+            # 오류 발생 시 롤백
             await session.rollback()
             logger.error(f"MariaDB 세션 오류: {e}")
             raise
@@ -85,89 +133,99 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-async def get_db_session_manual() -> AsyncSession:
+@asynccontextmanager
+async def get_mariadb_session_context():
     """
-    수동 관리용 세션 생성
-    서비스 레이어에서 직접 트랜잭션 관리할 때 사용
+    컨텍스트 매니저로 사용할 수 있는 세션
+    비즈니스 로직에서 직접 사용
     """
-    return AsyncSessionLocal()
+    if not AsyncSessionLocal:
+        raise RuntimeError("MariaDB가 초기화되지 않았습니다.")
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"MariaDB 컨텍스트 세션 오류: {e}")
+            raise
+        finally:
+            await session.close()
 
 
-# ==========================================
-# 연결 관리 함수들
-# ==========================================
-
-async def init_mariadb():
-    """MariaDB 연결 초기화 및 테스트"""
-    try:
-        # 연결 테스트
-        async with async_engine.begin() as conn:
-            result = await conn.execute(text("SELECT 1 as test"))
-            test_value = result.scalar()
-            
-            if test_value != 1:
-                raise Exception("연결 테스트 실패")
-        
-        # 데이터베이스 정보 확인
-        async with AsyncSessionLocal() as session:
-            # 데이터베이스 버전 확인
-            result = await session.execute(text("SELECT VERSION() as version"))
-            version = result.scalar()
-            logger.info(f"MariaDB 버전: {version}")
-            
-            # 문자셋 확인
-            result = await session.execute(text(
-                "SELECT @@character_set_database as charset, @@collation_database as collation"
-            ))
-            charset_info = result.fetchone()
-            logger.info(f"문자셋: {charset_info.charset}, 콜레이션: {charset_info.collation}")
-            
-            # 타임존 확인
-            result = await session.execute(text("SELECT @@time_zone as timezone"))
-            timezone = result.scalar()
-            logger.info(f"타임존: {timezone}")
-        
-        logger.info("✅ MariaDB 연결 초기화 성공")
-        
-    except Exception as e:
-        logger.error(f"❌ MariaDB 연결 초기화 실패: {e}")
-        raise
-
-
-async def close_mariadb():
-    """MariaDB 연결 종료"""
-    try:
-        # 모든 연결 정리
-        await async_engine.dispose()
-        logger.info("✅ MariaDB 연결 종료 완료")
-        
-    except Exception as e:
-        logger.error(f"❌ MariaDB 연결 종료 오류: {e}")
-        raise
-
-
+# ===========================================
+# 헬스체크 및 유틸리티
+# ===========================================
 async def check_mariadb_health() -> bool:
     """MariaDB 연결 상태 확인"""
     try:
+        if not mariadb_engine:
+            return False
+        
         async with AsyncSessionLocal() as session:
-            # 간단한 쿼리로 연결 상태 확인
-            await session.execute(text("SELECT 1"))
-            return True
+            result = await session.execute(text("SELECT 1"))
+            return result.scalar() == 1
             
     except Exception as e:
         logger.warning(f"MariaDB 헬스체크 실패: {e}")
         return False
 
 
-# ==========================================
-# 데이터베이스 유틸리티 함수들
-# ==========================================
-
-async def create_all_tables():
-    """모든 테이블 생성 (개발환경용)"""
+async def get_mariadb_info() -> dict:
+    """MariaDB 서버 정보 조회"""
     try:
-        async with async_engine.begin() as conn:
+        if not AsyncSessionLocal:
+            return {"status": "not_initialized"}
+        
+        async with AsyncSessionLocal() as session:
+            # 서버 버전 조회
+            version_result = await session.execute(text("SELECT VERSION() as version"))
+            version = version_result.scalar()
+            
+            # 연결 수 조회
+            connections_result = await session.execute(
+                text("SHOW STATUS LIKE 'Threads_connected'")
+            )
+            connections_row = connections_result.fetchone()
+            connections = connections_row[1] if connections_row else "Unknown"
+            
+            # 데이터베이스 목록
+            databases_result = await session.execute(text("SHOW DATABASES"))
+            databases = [row[0] for row in databases_result.fetchall()]
+            
+            return {
+                "status": "connected",
+                "version": version,
+                "current_connections": connections,
+                "database": settings.MARIADB_DATABASE,
+                "host": settings.MARIADB_HOST,
+                "port": settings.MARIADB_PORT,
+                "pool_size": settings.MARIADB_POOL_SIZE,
+                "databases": databases
+            }
+            
+    except Exception as e:
+        logger.error(f"MariaDB 정보 조회 실패: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ===========================================
+# 테이블 관리 유틸리티
+# ===========================================
+async def create_all_tables():
+    """모든 테이블 생성 (개발환경에서만)"""
+    if settings.ENVIRONMENT != "development":
+        raise RuntimeError("테이블 생성은 개발환경에서만 가능합니다")
+    
+    try:
+        if not mariadb_engine:
+            raise RuntimeError("MariaDB 엔진이 초기화되지 않았습니다")
+        
+        # 모든 모델이 임포트된 후에 테이블 생성
+        async with mariadb_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        
         logger.info("✅ 모든 테이블 생성 완료")
         
     except Exception as e:
@@ -176,130 +234,74 @@ async def create_all_tables():
 
 
 async def drop_all_tables():
-    """모든 테이블 삭제 (테스트환경용)"""
+    """모든 테이블 삭제 (개발환경에서만)"""
+    if settings.ENVIRONMENT != "development":
+        raise RuntimeError("테이블 삭제는 개발환경에서만 가능합니다")
+    
     try:
-        async with async_engine.begin() as conn:
+        if not mariadb_engine:
+            raise RuntimeError("MariaDB 엔진이 초기화되지 않았습니다")
+        
+        async with mariadb_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-        logger.info("✅ 모든 테이블 삭제 완료")
+        
+        logger.warning("🗑️ 모든 테이블 삭제 완료")
         
     except Exception as e:
         logger.error(f"❌ 테이블 삭제 실패: {e}")
         raise
 
 
-async def get_database_stats():
-    """데이터베이스 통계 정보 조회"""
+async def reset_all_tables():
+    """모든 테이블 재생성 (개발환경에서만)"""
+    if settings.ENVIRONMENT != "development":
+        raise RuntimeError("테이블 리셋은 개발환경에서만 가능합니다")
+    
+    logger.warning("🔄 테이블 리셋 시작...")
+    
     try:
-        async with AsyncSessionLocal() as session:
-            # 테이블 목록 및 레코드 수
-            tables_query = text("""
-                SELECT 
-                    TABLE_NAME,
-                    TABLE_ROWS,
-                    DATA_LENGTH,
-                    INDEX_LENGTH,
-                    CREATE_TIME,
-                    UPDATE_TIME
-                FROM information_schema.TABLES 
-                WHERE TABLE_SCHEMA = :db_name
-                ORDER BY TABLE_NAME
-            """)
-            
-            result = await session.execute(
-                tables_query, 
-                {"db_name": settings.MARIADB_DATABASE}
-            )
-            tables_info = result.fetchall()
-            
-            # 연결 풀 통계
-            pool_stats = {
-                "pool_size": async_engine.pool.size(),
-                "checked_in": async_engine.pool.checkedin(),
-                "checked_out": async_engine.pool.checkedout(),
-                "overflow": async_engine.pool.overflow(),
-                "invalid": async_engine.pool.invalid()
-            }
-            
-            return {
-                "tables": [
-                    {
-                        "name": table.TABLE_NAME,
-                        "rows": table.TABLE_ROWS,
-                        "data_size": table.DATA_LENGTH,
-                        "index_size": table.INDEX_LENGTH,
-                        "created": table.CREATE_TIME,
-                        "updated": table.UPDATE_TIME
-                    }
-                    for table in tables_info
-                ],
-                "pool_stats": pool_stats,
-                "database": settings.MARIADB_DATABASE
-            }
-            
+        await drop_all_tables()
+        await create_all_tables()
+        logger.warning("🔄 테이블 리셋 완료")
+        
     except Exception as e:
-        logger.error(f"데이터베이스 통계 조회 실패: {e}")
-        return {}
+        logger.error(f"❌ 테이블 리셋 실패: {e}")
+        raise
 
 
-# ==========================================
-# 트랜잭션 관리 유틸리티
-# ==========================================
-
-class DatabaseTransaction:
-    """데이터베이스 트랜잭션 컨텍스트 매니저"""
-    
-    def __init__(self):
-        self.session: AsyncSession = None
-    
-    async def __aenter__(self) -> AsyncSession:
-        self.session = AsyncSessionLocal()
-        return self.session
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+# ===========================================
+# 트랜잭션 유틸리티
+# ===========================================
+@asynccontextmanager
+async def transaction():
+    """트랜잭션 컨텍스트 매니저"""
+    async with get_mariadb_session_context() as session:
         try:
-            if exc_type is None:
-                # 성공 시 커밋
-                await self.session.commit()
-            else:
-                # 실패 시 롤백
-                await self.session.rollback()
-        finally:
-            await self.session.close()
+            yield session
+            # 컨텍스트 매니저에서 자동으로 커밋됨
+        except Exception:
+            # 컨텍스트 매니저에서 자동으로 롤백됨
+            raise
 
 
-async def execute_in_transaction(operation_func, *args, **kwargs):
+async def execute_sql(sql: str, params: dict = None) -> list:
     """
-    트랜잭션 내에서 작업 실행
-    
-    Args:
-        operation_func: 실행할 함수 (첫 번째 인자로 session을 받아야 함)
-        *args, **kwargs: 함수에 전달할 인자들
+    직접 SQL 실행 (개발/디버깅용)
+    주의: 프로덕션에서는 ORM 사용 권장
     """
-    async with DatabaseTransaction() as session:
-        return await operation_func(session, *args, **kwargs)
-
-
-# ==========================================
-# 개발 도구
-# ==========================================
-
-async def execute_raw_sql(sql: str, params: dict = None):
-    """
-    원시 SQL 실행 (개발/디버깅용)
-    운영환경에서는 사용 금지
-    """
-    if settings.ENVIRONMENT == "production":
-        raise RuntimeError("운영환경에서는 원시 SQL 실행이 금지됩니다.")
-    
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_mariadb_session_context() as session:
             result = await session.execute(text(sql), params or {})
+            
+            # SELECT 쿼리인 경우 결과 반환
             if sql.strip().upper().startswith('SELECT'):
                 return result.fetchall()
             else:
-                await session.commit()
-                return result.rowcount
+                return []
                 
+    except SQLAlchemyError as e:
+        logger.error(f"SQL 실행 오류: {e}")
+        raise
     except Exception as e:
-        logger.error(f"원시 SQL 실행 실패: {e}")
+        logger.error(f"예상치 못한 SQL 오류: {e}")
         raise
