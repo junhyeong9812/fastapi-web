@@ -1,106 +1,66 @@
-# FastAPI Multi-Database Project Dependencies
-# 최적화된 의존성 목록 (2024년 기준 안정 버전)
-
-# ==========================================
-# 핵심 웹 프레임워크
-# ==========================================
+# Core Framework
 fastapi==0.110.1
-uvicorn[standard]==0.29.0        # 성능 최적화를 위한 standard 버전
+uvicorn[standard]==0.29.0
 pydantic==2.6.4
-pydantic-settings==2.2.1         # 설정 관리
-python-multipart==0.0.9          # 파일 업로드 지원
+pydantic-settings==2.2.1
+python-multipart==0.0.9
 
-# ==========================================
-# 데이터베이스 드라이버 및 ORM
-# ==========================================
-# MariaDB/MySQL
-aiomysql==0.2.0                  # 비동기 MySQL 드라이버
-sqlalchemy[asyncio]==2.0.29      # 비동기 ORM
-alembic==1.13.1                  # 데이터베이스 마이그레이션
+# Database Drivers and ORM
+aiomysql==0.2.0
+sqlalchemy[asyncio]==2.0.29
+alembic==1.13.1
+elasticsearch==7.17.9
+elasticsearch-dsl==7.4.1
+motor==3.4.0
+beanie==1.25.0
 
-# Elasticsearch
-elasticsearch==7.17.9            # 검색 엔진
-elasticsearch-dsl==7.4.1         # Elasticsearch DSL
+# Security and Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.0
 
-# MongoDB
-motor==3.4.0                     # 비동기 MongoDB 드라이버
-beanie==1.25.0                   # 비동기 MongoDB ODM
+# Session and Caching
+aioredis==2.0.1
+redis==5.0.4
 
-# ==========================================
-# 보안 및 인증
-# ==========================================
-python-jose[cryptography]==3.3.0  # JWT 토큰 처리
-passlib[bcrypt]==1.7.4             # 비밀번호 해싱
-python-dotenv==1.0.0               # 환경변수 로딩
+# File Handling and Utils
+aiofiles==23.2.1
+python-slugify==8.0.4
 
-# ==========================================
-# 세션 및 캐싱
-# ==========================================
-aioredis==2.0.1                   # Redis 비동기 클라이언트
-redis==5.0.4                      # Redis 동기 클라이언트 (백업용)
+# Korean Language Processing
+g2pk==0.9.4
+jamo==0.4.1
 
-# ==========================================
-# 파일 처리 및 유틸리티
-# ==========================================
-aiofiles==23.2.1                  # 비동기 파일 처리
-python-slugify==8.0.4             # URL 슬러그 생성
+# Logging and Monitoring
+loguru==0.7.0
+structlog==24.1.0
+python-json-logger==2.0.7
 
-# ==========================================
-# 한국어 처리 (텍스트 분석)
-# ==========================================
-g2pk==0.9.4                       # 한글 음성학적 변환
-jamo==0.4.1                       # 한글 자모 분리/결합
+# HTTP Clients
+httpx==0.27.0
+aiohttp==3.9.5
 
-# ==========================================
-# 로깅 및 모니터링
-# ==========================================
-loguru==0.7.0                     # 향상된 로깅
-structlog==24.1.0                 # 구조적 로깅
-python-json-logger==2.0.7         # JSON 포맷 로깅
+# Data Processing
+pandas==2.2.1
+numpy==1.26.4
 
-# ==========================================
-# HTTP 클라이언트
-# ==========================================
-httpx==0.27.0                     # 비동기 HTTP 클라이언트
-aiohttp==3.9.5                    # 대안 HTTP 클라이언트
-
-# ==========================================
-# 데이터 처리
-# ==========================================
-pandas==2.2.1                     # 데이터 분석 (선택적)
-numpy==1.26.4                     # 수치 계산
-
-# ==========================================
-# 테스트 도구
-# ==========================================
+# Testing Tools
 pytest==7.4.4
 pytest-asyncio==0.23.6
 pytest-cov==4.1.0
 pytest-mock==3.12.0
-faker==24.4.0                     # 테스트 데이터 생성
+faker==24.4.0
 
-# ==========================================
-# 개발 도구
-# ==========================================
-black==24.3.0                     # 코드 포맷터
-isort==5.13.2                     # import 정렬
-flake8==7.0.0                     # 린터
-mypy==1.9.0                       # 타입 체커
-pre-commit==3.7.0                 # Git 훅
+# Dev Tools
+black==24.3.0
+isort==5.13.2
+flake8==7.0.0
+mypy==1.9.0
+pre-commit==3.7.0
 
-# ==========================================
-# 프로덕션 서버 (선택적)
-# ==========================================
-gunicorn==21.2.0                  # WSGI 서버
-gevent==24.2.1                    # 비동기 지원
+# Production Server (Optional)
+gunicorn==21.2.0
+gevent==24.2.1
 
-# ==========================================
-# 템플릿 엔진 (선택적)
-# ==========================================
-jinja2==3.1.3                     # HTML 템플릿
-
-# ==========================================
-# API 문서화
-# ==========================================
-# FastAPI에 내장되어 있어 별도 설치 불필요
-# swagger-ui-bundle, redoc은 FastAPI가 자동으로 처리
+# Template Engine (Optional)
+jinja2==3.1.3
