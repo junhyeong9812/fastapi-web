@@ -1,4 +1,4 @@
-# domains/users/models/user_session.py
+# domains/users/models/mariadb/user_session.py
 """
 사용자 세션 모델
 """

@@ -1,15 +1,18 @@
-# domains/users/repositories/user_login_history_repository.py
+# domains/users/repositories/mariadb/user_login_history_repository.py
 """
-사용자 로그인 이력 리포지토리
+사용자 로그인 이력 리포지토리 - MariaDB
 """
 
 from typing import Optional, List, Dict, Any, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func, desc
+from sqlalchemy import and_, or_, func, desc, asc, text
 from datetime import datetime, timedelta
 
-from domains.users.models.user_login_history import UserLoginHistory
+from domains.users.models.mariadb.user_login_history import UserLoginHistory
 from domains.users.schemas.user_login_history import LoginHistoryFilterRequest
+from core.logging import get_domain_logger
+
+logger = get_domain_logger("users.login_history")
 
 
 class UserLoginHistoryRepository:
@@ -27,6 +30,14 @@ class UserLoginHistoryRepository:
         login_history = UserLoginHistory(**login_data)
         self.db.add(login_history)
         self.db.flush()
+        
+        logger.info(
+            "로그인 이력 생성",
+            user_id=login_history.user_id,
+            success=login_history.success,
+            login_type=login_history.login_type,
+            ip_address=login_history.ip_address
+        )
         return login_history
     
     def get_by_id(self, history_id: int) -> Optional[UserLoginHistory]:
@@ -41,7 +52,7 @@ class UserLoginHistoryRepository:
         return self.db.query(UserLoginHistory).filter(
             UserLoginHistory.user_id == user_id,
             UserLoginHistory.is_deleted == False
-        ).order_by(UserLoginHistory.created_at.desc()).limit(limit).all()
+        ).order_by(desc(UserLoginHistory.created_at)).limit(limit).all()
     
     def get_recent_user_logins(self, user_id: int, days: int = 30) -> List[UserLoginHistory]:
         """사용자의 최근 로그인 이력"""
@@ -51,7 +62,7 @@ class UserLoginHistoryRepository:
             UserLoginHistory.user_id == user_id,
             UserLoginHistory.created_at >= cutoff_date,
             UserLoginHistory.is_deleted == False
-        ).order_by(UserLoginHistory.created_at.desc()).all()
+        ).order_by(desc(UserLoginHistory.created_at)).all()
     
     def get_successful_logins(self, user_id: int, limit: int = 20) -> List[UserLoginHistory]:
         """사용자의 성공한 로그인 이력"""
@@ -59,7 +70,7 @@ class UserLoginHistoryRepository:
             UserLoginHistory.user_id == user_id,
             UserLoginHistory.success == True,
             UserLoginHistory.is_deleted == False
-        ).order_by(UserLoginHistory.created_at.desc()).limit(limit).all()
+        ).order_by(desc(UserLoginHistory.created_at)).limit(limit).all()
     
     def get_failed_logins(self, user_id: int, limit: int = 20) -> List[UserLoginHistory]:
         """사용자의 실패한 로그인 이력"""
@@ -67,7 +78,7 @@ class UserLoginHistoryRepository:
             UserLoginHistory.user_id == user_id,
             UserLoginHistory.success == False,
             UserLoginHistory.is_deleted == False
-        ).order_by(UserLoginHistory.created_at.desc()).limit(limit).all()
+        ).order_by(desc(UserLoginHistory.created_at)).limit(limit).all()
     
     def update(self, login_history: UserLoginHistory, update_data: Dict[str, Any]) -> UserLoginHistory:
         """로그인 이력 업데이트"""
@@ -75,6 +86,7 @@ class UserLoginHistoryRepository:
             if hasattr(login_history, field):
                 setattr(login_history, field, value)
         
+        login_history.updated_at = datetime.now()
         self.db.flush()
         return login_history
     
@@ -90,6 +102,27 @@ class UserLoginHistoryRepository:
     
     def filter_login_history(self, filters: LoginHistoryFilterRequest) -> Tuple[List[UserLoginHistory], int]:
         """로그인 이력 필터링"""
+        query = self._build_filter_query(filters)
+        
+        # 총 개수 조회
+        total_count = query.count()
+        
+        # 정렬 적용
+        query = self._apply_sorting(query, filters)
+        
+        # 결과 반환
+        results = query.all()
+        
+        logger.debug(
+            "로그인 이력 필터링 완료",
+            total_count=total_count,
+            returned_count=len(results)
+        )
+        
+        return results, total_count
+    
+    def _build_filter_query(self, filters: LoginHistoryFilterRequest):
+        """필터 쿼리 빌드"""
         query = self.db.query(UserLoginHistory).filter(UserLoginHistory.is_deleted == False)
         
         # 사용자 ID 필터
@@ -116,20 +149,27 @@ class UserLoginHistoryRepository:
         if filters.is_mobile is not None:
             if filters.is_mobile:
                 query = query.filter(
-                    UserLoginHistory.device_info.contains({'device_type': 'mobile'})
+                    func.json_extract(UserLoginHistory.device_info, '$.device_type').like('%mobile%')
+                )
+            else:
+                query = query.filter(
+                    or_(
+                        func.json_extract(UserLoginHistory.device_info, '$.device_type').notlike('%mobile%'),
+                        UserLoginHistory.device_info.is_(None)
+                    )
                 )
         
         # 해외 로그인 필터
         if filters.is_foreign is not None:
             if filters.is_foreign:
                 query = query.filter(
-                    UserLoginHistory.location_info['country_code'] != 'KR'
+                    func.json_extract(UserLoginHistory.location_info, '$.country_code') != 'KR'
                 )
             else:
                 query = query.filter(
                     or_(
-                        UserLoginHistory.location_info['country_code'] == 'KR',
-                        UserLoginHistory.location_info['country_code'].is_(None)
+                        func.json_extract(UserLoginHistory.location_info, '$.country_code') == 'KR',
+                        UserLoginHistory.location_info.is_(None)
                     )
                 )
         
@@ -140,13 +180,13 @@ class UserLoginHistoryRepository:
         # 국가 필터
         if filters.country:
             query = query.filter(
-                UserLoginHistory.location_info['country'] == filters.country
+                func.json_extract(UserLoginHistory.location_info, '$.country') == filters.country
             )
         
         # 도시 필터
         if filters.city:
             query = query.filter(
-                UserLoginHistory.location_info['city'] == filters.city
+                func.json_extract(UserLoginHistory.location_info, '$.city') == filters.city
             )
         
         # 날짜 범위 필터
@@ -159,39 +199,26 @@ class UserLoginHistoryRepository:
         # 날짜 범위 프리셋
         if filters.date_range:
             end_date = datetime.now()
-            if filters.date_range == "today":
-                start_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            elif filters.date_range == "yesterday":
-                start_date = (end_date - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            elif filters.date_range == "week":
-                start_date = end_date - timedelta(days=7)
-            elif filters.date_range == "month":
-                start_date = end_date - timedelta(days=30)
-            elif filters.date_range == "quarter":
-                start_date = end_date - timedelta(days=90)
-            elif filters.date_range == "year":
-                start_date = end_date - timedelta(days=365)
-            else:
-                start_date = None
+            start_date = self._get_date_range_start(filters.date_range, end_date)
             
             if start_date:
                 query = query.filter(UserLoginHistory.created_at >= start_date)
                 if filters.date_range == "yesterday":
-                    query = query.filter(UserLoginHistory.created_at <= end_date)
+                    query = query.filter(UserLoginHistory.created_at <= end_date.replace(hour=0, minute=0, second=0, microsecond=0))
         
         # 위험도 필터
         if filters.risk_level:
-            if filters.risk_level == "minimal":
-                query = query.filter(UserLoginHistory.risk_score < 20)
-            elif filters.risk_level == "low":
-                query = query.filter(UserLoginHistory.risk_score.between(20, 39))
-            elif filters.risk_level == "medium":
-                query = query.filter(UserLoginHistory.risk_score.between(40, 59))
-            elif filters.risk_level == "high":
-                query = query.filter(UserLoginHistory.risk_score.between(60, 79))
-            elif filters.risk_level == "critical":
-                query = query.filter(UserLoginHistory.risk_score >= 80)
+            risk_ranges = {
+                "minimal": (0, 19),
+                "low": (20, 39),
+                "medium": (40, 59),
+                "high": (60, 79),
+                "critical": (80, 100)
+            }
+            
+            if filters.risk_level in risk_ranges:
+                min_score, max_score = risk_ranges[filters.risk_level]
+                query = query.filter(UserLoginHistory.risk_score.between(min_score, max_score))
         
         if filters.min_risk_score is not None:
             query = query.filter(UserLoginHistory.risk_score >= filters.min_risk_score)
@@ -219,29 +246,42 @@ class UserLoginHistoryRepository:
             else:
                 query = query.filter(~UserLoginHistory.failure_reason.in_(user_error_reasons))
         
-        # 총 개수 조회
-        total_count = query.count()
+        return query
+    
+    def _get_date_range_start(self, date_range: str, end_date: datetime) -> Optional[datetime]:
+        """날짜 범위 시작일 계산"""
+        if date_range == "today":
+            return end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif date_range == "yesterday":
+            return (end_date - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif date_range == "week":
+            return end_date - timedelta(days=7)
+        elif date_range == "month":
+            return end_date - timedelta(days=30)
+        elif date_range == "quarter":
+            return end_date - timedelta(days=90)
+        elif date_range == "year":
+            return end_date - timedelta(days=365)
+        return None
+    
+    def _apply_sorting(self, query, filters: LoginHistoryFilterRequest):
+        """정렬 적용"""
+        sort_mapping = {
+            "created_at": UserLoginHistory.created_at,
+            "login_type": UserLoginHistory.login_type,
+            "success": UserLoginHistory.success,
+            "risk_score": UserLoginHistory.risk_score,
+            "ip_address": UserLoginHistory.ip_address
+        }
         
-        # 정렬
-        if filters.sort_by == "created_at":
-            order_field = UserLoginHistory.created_at
-        elif filters.sort_by == "login_type":
-            order_field = UserLoginHistory.login_type
-        elif filters.sort_by == "success":
-            order_field = UserLoginHistory.success
-        elif filters.sort_by == "risk_score":
-            order_field = UserLoginHistory.risk_score
-        elif filters.sort_by == "ip_address":
-            order_field = UserLoginHistory.ip_address
-        else:
-            order_field = UserLoginHistory.created_at
+        sort_field = sort_mapping.get(filters.sort_by, UserLoginHistory.created_at)
         
         if filters.sort_order == "asc":
-            query = query.order_by(order_field.asc())
+            query = query.order_by(asc(sort_field))
         else:
-            query = query.order_by(order_field.desc())
+            query = query.order_by(desc(sort_field))
         
-        return query.all(), total_count
+        return query
     
     # ===========================================
     # 통계 및 분석
@@ -286,7 +326,7 @@ class UserLoginHistoryRepository:
         for login_type, count in login_types:
             stats[f"{login_type}_logins"] = count
         
-        # 기기/위치 통계
+        # 기기/위치 통계 (모델 메서드 활용)
         histories = base_query.all()
         
         unique_devices = set()
@@ -297,13 +337,13 @@ class UserLoginHistoryRepository:
         
         for history in histories:
             if history.device_info:
-                device_key = f"{history.device_info.get('browser', '')}-{history.device_info.get('os', '')}-{history.device_info.get('device_type', '')}"
+                device_key = history.get_device_name()
                 unique_devices.add(device_key)
                 if history.is_mobile_device():
                     mobile_count += 1
             
             if history.location_info:
-                location_key = f"{history.location_info.get('country', '')}-{history.location_info.get('city', '')}"
+                location_key = history.get_location_display()
                 unique_locations.add(location_key)
                 if history.is_foreign_login():
                     foreign_count += 1
@@ -371,49 +411,8 @@ class UserLoginHistoryRepository:
         if not histories:
             return {}
         
-        # 시간 패턴 분석
-        hours = [h.created_at.hour for h in histories]
-        days_of_week = [h.created_at.weekday() for h in histories]
-        
-        hour_counts = {}
-        for hour in hours:
-            hour_counts[hour] = hour_counts.get(hour, 0) + 1
-        
-        day_counts = {}
-        for day in days_of_week:
-            day_counts[day] = day_counts.get(day, 0) + 1
-        
-        # 기기 패턴
-        devices = {}
-        for history in histories:
-            if history.device_info:
-                device = history.get_device_name()
-                devices[device] = devices.get(device, 0) + 1
-        
-        # 위치 패턴
-        locations = {}
-        for history in histories:
-            if history.location_info:
-                location = history.get_location_display()
-                locations[location] = locations.get(location, 0) + 1
-        
-        # 최다 사용 시간대 (상위 3개)
-        preferred_hours = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-        preferred_hours = [hour for hour, count in preferred_hours]
-        
-        # 주말 활동 비율
-        weekend_logins = sum(1 for day in days_of_week if day >= 5)
-        weekend_activity = (weekend_logins / len(histories)) if histories else 0
-        
-        return {
-            "preferred_hours": preferred_hours,
-            "weekend_activity": round(weekend_activity, 2),
-            "hour_distribution": hour_counts,
-            "day_distribution": day_counts,
-            "primary_devices": dict(sorted(devices.items(), key=lambda x: x[1], reverse=True)[:5]),
-            "common_locations": dict(sorted(locations.items(), key=lambda x: x[1], reverse=True)[:5]),
-            "total_logins_analyzed": len(histories)
-        }
+        # 모델 메서드를 활용한 패턴 분석
+        return UserLoginHistory.analyze_login_patterns(histories)
     
     def get_failed_login_analysis(self, user_id: int = None, days: int = 30) -> Dict[str, Any]:
         """실패 로그인 분석"""
@@ -480,14 +479,14 @@ class UserLoginHistoryRepository:
         if user_id:
             query = query.filter(UserLoginHistory.user_id == user_id)
         
-        return query.order_by(UserLoginHistory.created_at.desc()).all()
+        return query.order_by(desc(UserLoginHistory.created_at)).all()
     
     def get_foreign_logins(self, user_id: int = None, days: int = 30) -> List[UserLoginHistory]:
         """해외 로그인 조회"""
         cutoff_date = datetime.now() - timedelta(days=days)
         
         query = self.db.query(UserLoginHistory).filter(
-            UserLoginHistory.location_info['country_code'] != 'KR',
+            func.json_extract(UserLoginHistory.location_info, '$.country_code') != 'KR',
             UserLoginHistory.created_at >= cutoff_date,
             UserLoginHistory.is_deleted == False
         )
@@ -495,7 +494,7 @@ class UserLoginHistoryRepository:
         if user_id:
             query = query.filter(UserLoginHistory.user_id == user_id)
         
-        return query.order_by(UserLoginHistory.created_at.desc()).all()
+        return query.order_by(desc(UserLoginHistory.created_at)).all()
     
     def get_brute_force_attempts(self, hours: int = 1, threshold: int = 5) -> List[Dict[str, Any]]:
         """브루트 포스 공격 감지"""
@@ -522,7 +521,7 @@ class UserLoginHistoryRepository:
                 UserLoginHistory.ip_address == ip,
                 UserLoginHistory.created_at >= cutoff_time,
                 UserLoginHistory.is_deleted == False
-            ).order_by(UserLoginHistory.created_at.desc()).all()
+            ).order_by(desc(UserLoginHistory.created_at)).all()
             
             results.append({
                 "ip_address": ip,
@@ -537,7 +536,7 @@ class UserLoginHistoryRepository:
     
     def get_login_anomalies(self, user_id: int, days: int = 30) -> List[UserLoginHistory]:
         """사용자의 비정상적인 로그인 감지"""
-        # 사용자의 일반적인 패턴 분석
+        # 사용자의 일반적인 패턴 분석 (지난 90일)
         pattern_period = datetime.now() - timedelta(days=90)
         normal_patterns = self.db.query(UserLoginHistory).filter(
             UserLoginHistory.user_id == user_id,
@@ -558,7 +557,7 @@ class UserLoginHistoryRepository:
         if not normal_patterns or not recent_logins:
             return []
         
-        # 패턴 분석 (간단한 버전)
+        # 패턴 분석 (모델 메서드 활용)
         normal_devices = set()
         normal_locations = set()
         normal_hours = set()
@@ -583,9 +582,8 @@ class UserLoginHistoryRepository:
             if login.location_info and login.get_location_display() not in normal_locations:
                 is_anomaly = True
             
-            # 비정상적인 시간
+            # 비정상적인 시간 (±2시간 허용)
             if login.created_at.hour not in normal_hours:
-                # 시간대가 완전히 다른 경우만 (±2시간 허용)
                 if not any(abs(login.created_at.hour - h) <= 2 or abs(login.created_at.hour - h) >= 22 for h in normal_hours):
                     is_anomaly = True
             
@@ -607,11 +605,14 @@ class UserLoginHistoryRepository:
             UserLoginHistory.is_deleted == False
         ).all()
         
+        count = 0
         for history in old_histories:
             history.soft_delete()
+            count += 1
         
         self.db.flush()
-        return len(old_histories)
+        logger.info(f"오래된 로그인 이력 정리", count=count)
+        return count
     
     def hard_delete_old_history(self, days_old: int = 1095) -> int:  # 3년
         """오래된 로그인 이력 하드 삭제"""
@@ -622,6 +623,7 @@ class UserLoginHistoryRepository:
         ).delete(synchronize_session=False)
         
         self.db.flush()
+        logger.warning(f"로그인 이력 하드 삭제", count=deleted_count)
         return deleted_count
     
     # ===========================================
@@ -639,36 +641,45 @@ class UserLoginHistoryRepository:
         """로그인 이력 일괄 의심스러움 표시"""
         histories = self.get_histories_by_ids(history_ids)
         
+        count = 0
         for history in histories:
             history.mark_as_suspicious(reason)
+            count += 1
         
         self.db.flush()
-        return len(histories)
+        logger.info(f"로그인 이력 일괄 의심 표시", count=count)
+        return count
     
     def bulk_clear_suspicious(self, history_ids: List[int]) -> int:
         """의심스러운 표시 일괄 해제"""
         histories = self.get_histories_by_ids(history_ids)
         
+        count = 0
         for history in histories:
             history.clear_suspicious_flag()
+            count += 1
         
         self.db.flush()
-        return len(histories)
+        logger.info(f"의심스러운 표시 일괄 해제", count=count)
+        return count
     
     def bulk_soft_delete(self, history_ids: List[int]) -> int:
         """로그인 이력 일괄 소프트 삭제"""
+        current_time = datetime.now()
         updated_count = self.db.query(UserLoginHistory).filter(
             UserLoginHistory.id.in_(history_ids),
             UserLoginHistory.is_deleted == False
         ).update(
             {
                 "is_deleted": True,
-                "deleted_at": datetime.now()
+                "deleted_at": current_time,
+                "updated_at": current_time
             },
             synchronize_session=False
         )
         
         self.db.flush()
+        logger.warning(f"로그인 이력 일괄 소프트 삭제", count=updated_count)
         return updated_count
     
     # ===========================================
@@ -792,3 +803,27 @@ class UserLoginHistoryRepository:
             recommendations.append("현재 로그인 패턴은 안전한 것으로 보입니다.")
         
         return recommendations
+    
+    # ===========================================
+    # 성능 최적화된 메서드
+    # ===========================================
+    
+    def count_recent_failed_attempts(self, user_id: int, ip_address: str, minutes: int = 15) -> int:
+        """최근 실패 시도 횟수 (빠른 조회)"""
+        cutoff_time = datetime.now() - timedelta(minutes=minutes)
+        
+        return self.db.query(func.count(UserLoginHistory.id)).filter(
+            UserLoginHistory.user_id == user_id,
+            UserLoginHistory.ip_address == ip_address,
+            UserLoginHistory.success == False,
+            UserLoginHistory.created_at >= cutoff_time,
+            UserLoginHistory.is_deleted == False
+        ).scalar()
+    
+    def get_last_successful_login(self, user_id: int) -> Optional[UserLoginHistory]:
+        """마지막 성공 로그인 (성능 최적화)"""
+        return self.db.query(UserLoginHistory).filter(
+            UserLoginHistory.user_id == user_id,
+            UserLoginHistory.success == True,
+            UserLoginHistory.is_deleted == False
+        ).order_by(desc(UserLoginHistory.created_at)).first()

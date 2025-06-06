@@ -1,4 +1,4 @@
-# domains/users/models/user_api_key.py
+# domains/users/models/mariadb/user_api_key.py
 """
 사용자 API 키 모델
 """

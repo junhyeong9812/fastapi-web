@@ -1,4 +1,4 @@
-# domains/users/models/__init__.py
+# domains/users/models/mariadb/__init__.py
 """
 사용자 도메인 모델들
 Spring JPA Entity와 유사한 구조로 분리된 모델들

@@ -1,18 +1,21 @@
-# domains/users/repositories/user_repository.py
+# domains/users/repositories/mariadb/user_repository.py
 """
-사용자 리포지토리
+사용자 리포지토리 - MariaDB
 기본 User 모델에 대한 데이터 접근 레이어
 """
 
-from typing import Optional, List, Dict, Any
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
+from typing import Optional, List, Dict, Any, Tuple
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, or_, func, desc, asc
 from datetime import datetime, timedelta
 
-from domains.users.models.user import User
+from domains.users.models.mariadb.user import User
 from domains.users.schemas.user_search import UserSearchRequest
+from domains.users.schemas.user_bulk_actions import UserBulkActionRequest
 from shared.enums import UserRole, UserStatus, UserProvider
-from shared.base_schemas import PaginationInfo
+from core.logging import get_domain_logger
+
+logger = get_domain_logger("users")
 
 
 class UserRepository:
@@ -30,6 +33,8 @@ class UserRepository:
         user = User(**user_data)
         self.db.add(user)
         self.db.flush()
+        
+        logger.info("사용자 생성 완료", user_id=user.id, email=user.email)
         return user
     
     def get_by_id(self, user_id: int) -> Optional[User]:
@@ -60,26 +65,54 @@ class UserRepository:
                 setattr(user, field, value)
         
         self.db.flush()
+        logger.info("사용자 정보 업데이트", user_id=user.id)
         return user
     
     def delete(self, user: User) -> bool:
         """사용자 소프트 삭제"""
         user.soft_delete()
         self.db.flush()
+        
+        logger.info("사용자 소프트 삭제", user_id=user.id)
         return True
     
     def hard_delete(self, user: User) -> bool:
         """사용자 하드 삭제 (물리적 삭제)"""
+        user_id = user.id
         self.db.delete(user)
         self.db.flush()
+        
+        logger.warning("사용자 하드 삭제", user_id=user_id)
         return True
     
     # ===========================================
     # 검색 및 필터링
     # ===========================================
     
-    def search(self, search_request: UserSearchRequest) -> tuple[List[User], int]:
+    def search(self, search_request: UserSearchRequest) -> Tuple[List[User], int]:
         """사용자 검색"""
+        query = self._build_search_query(search_request)
+        
+        # 총 개수 조회
+        total_count = query.count()
+        
+        # 정렬 적용
+        query = self._apply_sorting(query, search_request)
+        
+        # 페이지네이션 적용
+        users = query.offset(search_request.offset).limit(search_request.size).all()
+        
+        logger.debug(
+            "사용자 검색 완료",
+            total_count=total_count,
+            returned_count=len(users),
+            search_query=search_request.query
+        )
+        
+        return users, total_count
+    
+    def _build_search_query(self, search_request: UserSearchRequest):
+        """검색 쿼리 빌드"""
         query = self.db.query(User).filter(User.is_deleted == False)
         
         # 검색어 필터
@@ -108,7 +141,10 @@ class UserRepository:
         
         # 불린 필터들
         if search_request.is_active is not None:
-            query = query.filter(User.status == UserStatus.ACTIVE.value if search_request.is_active else User.status != UserStatus.ACTIVE.value)
+            if search_request.is_active:
+                query = query.filter(User.status == UserStatus.ACTIVE.value)
+            else:
+                query = query.filter(User.status != UserStatus.ACTIVE.value)
         
         if search_request.email_verified is not None:
             query = query.filter(User.email_verified == search_request.email_verified)
@@ -145,40 +181,31 @@ class UserRepository:
                 )
             )
         
-        # 총 개수 조회
-        total_count = query.count()
+        return query
+    
+    def _apply_sorting(self, query, search_request: UserSearchRequest):
+        """정렬 적용"""
+        sort_mapping = {
+            "created_at": User.created_at,
+            "updated_at": User.updated_at,
+            "email": User.email,
+            "full_name": User.full_name,
+            "last_login_at": User.last_login_at,
+            "login_count": User.login_count,
+            "role": User.role,
+            "status": User.status
+        }
         
-        # 정렬
-        if search_request.sort_by == "created_at":
-            order_field = User.created_at
-        elif search_request.sort_by == "updated_at":
-            order_field = User.updated_at
-        elif search_request.sort_by == "email":
-            order_field = User.email
-        elif search_request.sort_by == "full_name":
-            order_field = User.full_name
-        elif search_request.sort_by == "last_login_at":
-            order_field = User.last_login_at
-        elif search_request.sort_by == "login_count":
-            order_field = User.login_count
-        elif search_request.sort_by == "role":
-            order_field = User.role
-        elif search_request.sort_by == "status":
-            order_field = User.status
-        else:
-            order_field = User.created_at
+        sort_field = sort_mapping.get(search_request.sort_by, User.created_at)
         
         if search_request.sort_order == "asc":
-            query = query.order_by(order_field.asc())
+            query = query.order_by(asc(sort_field))
         else:
-            query = query.order_by(order_field.desc())
+            query = query.order_by(desc(sort_field))
         
-        # 페이지네이션
-        users = query.offset(search_request.offset).limit(search_request.size).all()
-        
-        return users, total_count
+        return query
     
-    def get_list(self, page: int = 1, size: int = 20, filters: Dict[str, Any] = None) -> tuple[List[User], int]:
+    def get_list(self, page: int = 1, size: int = 20, filters: Dict[str, Any] = None) -> Tuple[List[User], int]:
         """사용자 목록 조회"""
         query = self.db.query(User).filter(User.is_deleted == False)
         
@@ -331,11 +358,12 @@ class UserRepository:
             User.id.in_(user_ids),
             User.is_deleted == False
         ).update(
-            {"status": status.value},
+            {"status": status.value, "updated_at": datetime.now()},
             synchronize_session=False
         )
         
         self.db.flush()
+        logger.info(f"사용자 상태 일괄 변경", count=updated_count, status=status.value)
         return updated_count
     
     def bulk_update_role(self, user_ids: List[int], role: UserRole) -> int:
@@ -344,43 +372,50 @@ class UserRepository:
             User.id.in_(user_ids),
             User.is_deleted == False
         ).update(
-            {"role": role.value},
+            {"role": role.value, "updated_at": datetime.now()},
             synchronize_session=False
         )
         
         self.db.flush()
+        logger.info(f"사용자 역할 일괄 변경", count=updated_count, role=role.value)
         return updated_count
     
     def bulk_verify_emails(self, user_ids: List[int]) -> int:
         """이메일 일괄 인증"""
+        current_time = datetime.now()
         updated_count = self.db.query(User).filter(
             User.id.in_(user_ids),
             User.is_deleted == False
         ).update(
             {
                 "email_verified": True,
-                "email_verified_at": datetime.now()
+                "email_verified_at": current_time,
+                "updated_at": current_time
             },
             synchronize_session=False
         )
         
         self.db.flush()
+        logger.info(f"이메일 일괄 인증", count=updated_count)
         return updated_count
     
     def bulk_soft_delete(self, user_ids: List[int]) -> int:
         """사용자 일괄 소프트 삭제"""
+        current_time = datetime.now()
         updated_count = self.db.query(User).filter(
             User.id.in_(user_ids),
             User.is_deleted == False
         ).update(
             {
                 "is_deleted": True,
-                "deleted_at": datetime.now()
+                "deleted_at": current_time,
+                "updated_at": current_time
             },
             synchronize_session=False
         )
         
         self.db.flush()
+        logger.warning(f"사용자 일괄 소프트 삭제", count=updated_count)
         return updated_count
     
     # ===========================================
@@ -407,12 +442,14 @@ class UserRepository:
         ).update(
             {
                 "account_locked_until": None,
-                "failed_login_attempts": 0
+                "failed_login_attempts": 0,
+                "updated_at": current_time
             },
             synchronize_session=False
         )
         
         self.db.flush()
+        logger.info(f"만료된 계정 잠금 해제", count=updated_count)
         return updated_count
     
     def get_users_with_high_failed_attempts(self, threshold: int = 3) -> List[User]:
@@ -423,10 +460,107 @@ class UserRepository:
         ).all()
     
     # ===========================================
-    # 캐시 무효화 헬퍼
+    # 관계 조회 메서드
     # ===========================================
     
-    def invalidate_user_cache(self, user_id: int):
-        """사용자 캐시 무효화 (실제 구현은 서비스 레이어에서)"""
-        # 캐시 무효화 로직은 서비스 레이어에서 처리
-        pass
+    def get_user_with_api_keys(self, user_id: int) -> Optional[User]:
+        """사용자와 API 키들을 함께 조회"""
+        return self.db.query(User).options(
+            joinedload(User.api_keys)
+        ).filter(
+            User.id == user_id,
+            User.is_deleted == False
+        ).first()
+    
+    def get_user_with_sessions(self, user_id: int) -> Optional[User]:
+        """사용자와 세션들을 함께 조회"""
+        return self.db.query(User).options(
+            joinedload(User.sessions)
+        ).filter(
+            User.id == user_id,
+            User.is_deleted == False
+        ).first()
+    
+    def get_user_with_login_history(self, user_id: int, limit: int = 10) -> Optional[User]:
+        """사용자와 최근 로그인 이력을 함께 조회"""
+        return self.db.query(User).options(
+            joinedload(User.login_history).limit(limit)
+        ).filter(
+            User.id == user_id,
+            User.is_deleted == False
+        ).first()
+    
+    # ===========================================
+    # 커스텀 쿼리 메서드
+    # ===========================================
+    
+    def find_users_by_company(self, company_name: str) -> List[User]:
+        """회사명으로 사용자 검색"""
+        return self.db.query(User).filter(
+            User.company_name.ilike(f"%{company_name}%"),
+            User.is_deleted == False
+        ).all()
+    
+    def get_recently_registered_users(self, days: int = 7) -> List[User]:
+        """최근 가입한 사용자들"""
+        cutoff_date = datetime.now() - timedelta(days=days)
+        
+        return self.db.query(User).filter(
+            User.created_at >= cutoff_date,
+            User.is_deleted == False
+        ).order_by(desc(User.created_at)).all()
+    
+    def get_users_by_role_and_status(self, role: UserRole, status: UserStatus) -> List[User]:
+        """역할과 상태로 사용자 조회"""
+        return self.db.query(User).filter(
+            User.role == role.value,
+            User.status == status.value,
+            User.is_deleted == False
+        ).all()
+    
+    def count_users_by_provider(self) -> Dict[str, int]:
+        """제공자별 사용자 수 조회"""
+        result = self.db.query(
+            User.provider,
+            func.count(User.id).label('count')
+        ).filter(
+            User.is_deleted == False
+        ).group_by(User.provider).all()
+        
+        return {provider: count for provider, count in result}
+    
+    def get_top_active_users(self, limit: int = 10) -> List[User]:
+        """가장 활발한 사용자들 (로그인 횟수 기준)"""
+        return self.db.query(User).filter(
+            User.is_deleted == False,
+            User.status == UserStatus.ACTIVE.value
+        ).order_by(desc(User.login_count)).limit(limit).all()
+    
+    # ===========================================
+    # 성능 최적화된 메서드
+    # ===========================================
+    
+    def exists_by_email(self, email: str) -> bool:
+        """이메일 존재 여부 확인 (성능 최적화)"""
+        return self.db.query(
+            self.db.query(User).filter(
+                User.email == email.lower(),
+                User.is_deleted == False
+            ).exists()
+        ).scalar()
+    
+    def count_active_users(self) -> int:
+        """활성 사용자 수 조회 (성능 최적화)"""
+        return self.db.query(func.count(User.id)).filter(
+            User.status == UserStatus.ACTIVE.value,
+            User.is_deleted == False
+        ).scalar()
+    
+    def get_user_ids_by_email_domain(self, domain: str) -> List[int]:
+        """특정 도메인의 이메일을 가진 사용자 ID 목록"""
+        return [
+            user_id for user_id, in self.db.query(User.id).filter(
+                User.email.like(f"%@{domain}"),
+                User.is_deleted == False
+            ).all()
+        ]

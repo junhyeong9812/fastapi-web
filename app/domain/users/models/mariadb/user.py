@@ -1,4 +1,4 @@
-# domains/users/models/user.py
+# domains/users/models/mariadb/user.py
 """
 사용자 모델 - 도메인 엔티티 (순수한 데이터 + 도메인 규칙만)
 """

@@ -1,4 +1,4 @@
-# domains/users/models/user_login_history.py
+# domains/users/models/mariadb/user_login_history.py
 """
 사용자 로그인 이력 모델
 """
