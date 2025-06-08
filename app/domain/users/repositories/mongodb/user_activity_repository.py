@@ -1,11 +1,11 @@
 # domains/users/repositories/mongodb/user_activity_repository.py
 """
 MongoDB 사용자 활동 리포지토리
-사용자 활동 로그 및 행동 패턴 저장
+사용자 활동 로그 및 행동 패턴 저장/조회
 """
 
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
@@ -13,6 +13,12 @@ from pymongo import DESCENDING, ASCENDING
 from pymongo.errors import PyMongoError
 
 from core.database.mongodb import get_mongodb_database
+from domains.users.models.mongodb import UserActivity
+from domains.users.schemas.mongodb import (
+    UserActivityCreateRequest,
+    ActivitySearchRequest,
+    UserActivityResponse
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,18 +47,15 @@ class UserActivityRepository:
         try:
             collection = self.db[self.collection_name]
             
-            # 기본 인덱스들
-            await collection.create_index([("user_id", ASCENDING), ("timestamp", DESCENDING)])
-            await collection.create_index([("activity_type", ASCENDING)])
-            await collection.create_index([("timestamp", DESCENDING)])
-            await collection.create_index([("session_id", ASCENDING)])
+            # UserActivity 모델의 인덱스 정의 사용
+            index_definitions = UserActivity.create_index_definitions()
             
-            # 복합 인덱스
-            await collection.create_index([
-                ("user_id", ASCENDING),
-                ("activity_type", ASCENDING),
-                ("timestamp", DESCENDING)
-            ])
+            for index_def in index_definitions:
+                await collection.create_index(
+                    index_def["keys"],
+                    name=index_def["name"],
+                    background=True
+                )
             
             logger.debug(f"{self.collection_name} 인덱스 생성 완료")
             
@@ -60,35 +63,119 @@ class UserActivityRepository:
             logger.error(f"인덱스 생성 실패: {e}")
     
     # ===========================================
-    # 활동 로그 생성 및 조회
+    # 활동 생성 및 관리
     # ===========================================
     
-    async def log_activity(self, activity_data: Dict[str, Any]) -> Optional[str]:
-        """사용자 활동 로그 저장"""
+    async def create_activity(self, request: UserActivityCreateRequest) -> Optional[UserActivity]:
+        """사용자 활동 생성"""
+        try:
+            # 요청 검증
+            request.validate_required_fields_by_type()
+            
+            # UserActivity 모델 생성
+            activity = UserActivity(**request.to_activity_dict())
+            
+            collection = await self._get_collection()
+            result = await collection.insert_one(activity.to_mongo_dict())
+            
+            # 생성된 ID 설정
+            activity.id = str(result.inserted_id)
+            
+            logger.debug(f"활동 생성 완료: {activity.id}")
+            return activity
+            
+        except Exception as e:
+            logger.error(f"활동 생성 실패: {e}")
+            return None
+    
+    async def get_activity_by_id(self, activity_id: str) -> Optional[UserActivity]:
+        """ID로 활동 조회"""
         try:
             collection = await self._get_collection()
             
-            # 기본 필드 추가
-            activity_log = {
-                "timestamp": datetime.now(),
-                "created_at": datetime.now(),
-                **activity_data
-            }
+            doc = await collection.find_one({"_id": activity_id})
+            if doc:
+                return UserActivity.from_mongo(doc)
             
-            # 필수 필드 검증
-            required_fields = ["user_id", "activity_type"]
-            for field in required_fields:
-                if field not in activity_log:
-                    raise ValueError(f"필수 필드 누락: {field}")
-            
-            result = await collection.insert_one(activity_log)
-            
-            logger.debug(f"활동 로그 저장 완료: {result.inserted_id}")
-            return str(result.inserted_id)
+            return None
             
         except Exception as e:
-            logger.error(f"활동 로그 저장 실패: {e}")
+            logger.error(f"활동 조회 실패 (id: {activity_id}): {e}")
             return None
+    
+    async def update_activity(self, activity_id: str, update_data: Dict[str, Any]) -> Optional[UserActivity]:
+        """활동 정보 업데이트"""
+        try:
+            collection = await self._get_collection()
+            
+            # updated_at 필드 추가
+            update_data["updated_at"] = datetime.now()
+            
+            result = await collection.update_one(
+                {"_id": activity_id},
+                {"$set": update_data}
+            )
+            
+            if result.modified_count > 0:
+                return await self.get_activity_by_id(activity_id)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"활동 업데이트 실패 (id: {activity_id}): {e}")
+            return None
+    
+    async def delete_activity(self, activity_id: str) -> bool:
+        """활동 삭제"""
+        try:
+            collection = await self._get_collection()
+            
+            result = await collection.delete_one({"_id": activity_id})
+            return result.deleted_count > 0
+            
+        except Exception as e:
+            logger.error(f"활동 삭제 실패 (id: {activity_id}): {e}")
+            return False
+    
+    # ===========================================
+    # 활동 검색 및 조회
+    # ===========================================
+    
+    async def search_activities(self, search_request: ActivitySearchRequest) -> Tuple[List[UserActivity], int]:
+        """활동 검색"""
+        try:
+            collection = await self._get_collection()
+            
+            # 날짜 범위 프리셋 적용
+            search_request.apply_date_range_preset()
+            
+            # MongoDB 쿼리 생성
+            query = search_request.to_mongodb_query()
+            
+            # 총 개수 조회
+            total_count = await collection.count_documents(query)
+            
+            # 정렬 기준
+            sort_criteria = search_request.get_sort_criteria()
+            
+            # 결과 조회
+            cursor = collection.find(query)
+            cursor = cursor.sort(sort_criteria)
+            cursor = cursor.skip(search_request.offset).limit(search_request.limit)
+            
+            activities = []
+            async for doc in cursor:
+                activities.append(UserActivity.from_mongo(doc))
+            
+            logger.debug(
+                f"활동 검색 완료: {len(activities)}개 조회 (전체: {total_count}개)"
+            )
+            
+            return activities, total_count
+            
+        except Exception as e:
+            logger.error(f"활동 검색 실패: {e}")
+            return [], 0
     
     async def get_user_activities(
         self, 
@@ -97,8 +184,8 @@ class UserActivityRepository:
         activity_type: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
-    ) -> List[Dict[str, Any]]:
-        """사용자 활동 로그 조회"""
+    ) -> List[UserActivity]:
+        """사용자 활동 조회"""
         try:
             collection = await self._get_collection()
             
@@ -109,19 +196,18 @@ class UserActivityRepository:
                 query["activity_type"] = activity_type
             
             if start_date or end_date:
-                query["timestamp"] = {}
+                query["created_at"] = {}
                 if start_date:
-                    query["timestamp"]["$gte"] = start_date
+                    query["created_at"]["$gte"] = start_date
                 if end_date:
-                    query["timestamp"]["$lte"] = end_date
+                    query["created_at"]["$lte"] = end_date
             
             # 조회 실행
-            cursor = collection.find(query).sort("timestamp", DESCENDING).limit(limit)
-            activities = await cursor.to_list(length=limit)
+            cursor = collection.find(query).sort("created_at", DESCENDING).limit(limit)
             
-            # ObjectId를 문자열로 변환
-            for activity in activities:
-                activity["_id"] = str(activity["_id"])
+            activities = []
+            async for doc in cursor:
+                activities.append(UserActivity.from_mongo(doc))
             
             return activities
             
@@ -129,19 +215,19 @@ class UserActivityRepository:
             logger.error(f"사용자 활동 조회 실패 (user_id: {user_id}): {e}")
             return []
     
-    async def get_recent_activities(self, hours: int = 24, limit: int = 1000) -> List[Dict[str, Any]]:
-        """최근 활동 로그 조회"""
+    async def get_recent_activities(self, hours: int = 24, limit: int = 1000) -> List[UserActivity]:
+        """최근 활동 조회"""
         try:
             collection = await self._get_collection()
             
             start_time = datetime.now() - timedelta(hours=hours)
-            query = {"timestamp": {"$gte": start_time}}
+            query = {"created_at": {"$gte": start_time}}
             
-            cursor = collection.find(query).sort("timestamp", DESCENDING).limit(limit)
-            activities = await cursor.to_list(length=limit)
+            cursor = collection.find(query).sort("created_at", DESCENDING).limit(limit)
             
-            for activity in activities:
-                activity["_id"] = str(activity["_id"])
+            activities = []
+            async for doc in cursor:
+                activities.append(UserActivity.from_mongo(doc))
             
             return activities
             
@@ -149,46 +235,75 @@ class UserActivityRepository:
             logger.error(f"최근 활동 조회 실패: {e}")
             return []
     
+    async def get_activities_by_session(self, session_id: str) -> List[UserActivity]:
+        """세션별 활동 조회"""
+        try:
+            collection = await self._get_collection()
+            
+            query = {"session_id": session_id}
+            cursor = collection.find(query).sort("created_at", ASCENDING)
+            
+            activities = []
+            async for doc in cursor:
+                activities.append(UserActivity.from_mongo(doc))
+            
+            return activities
+            
+        except Exception as e:
+            logger.error(f"세션 활동 조회 실패 (session_id: {session_id}): {e}")
+            return []
+    
     # ===========================================
-    # 활동 통계 및 분석
+    # 통계 및 분석
     # ===========================================
     
-    async def get_activity_stats(self, user_id: int, days: int = 30) -> Dict[str, Any]:
-        """사용자 활동 통계"""
+    async def get_activity_stats(self, user_id: int = None, days: int = 30) -> Dict[str, Any]:
+        """활동 통계"""
         try:
             collection = await self._get_collection()
             
             start_date = datetime.now() - timedelta(days=days)
             
+            # 기본 매치 조건
+            match_stage = {"created_at": {"$gte": start_date}}
+            if user_id:
+                match_stage["user_id"] = user_id
+            
             # 집계 파이프라인
             pipeline = [
-                {
-                    "$match": {
-                        "user_id": user_id,
-                        "timestamp": {"$gte": start_date}
-                    }
-                },
+                {"$match": match_stage},
                 {
                     "$group": {
                         "_id": "$activity_type",
                         "count": {"$sum": 1},
-                        "last_activity": {"$max": "$timestamp"}
+                        "last_activity": {"$max": "$created_at"},
+                        "success_count": {
+                            "$sum": {"$cond": [{"$eq": ["$success", True]}, 1, 0]}
+                        },
+                        "avg_duration": {"$avg": "$duration"}
                     }
                 },
-                {
-                    "$sort": {"count": -1}
-                }
+                {"$sort": {"count": -1}}
             ]
             
-            results = await collection.aggregate(pipeline).to_list(length=None)
+            results = []
+            async for doc in collection.aggregate(pipeline):
+                results.append(doc)
             
             # 통계 정리
+            total_activities = sum(item["count"] for item in results)
+            total_success = sum(item["success_count"] for item in results)
+            
             stats = {
-                "total_activities": sum(item["count"] for item in results),
+                "total_activities": total_activities,
+                "success_rate": round((total_success / total_activities) * 100, 2) if total_activities > 0 else 0,
                 "activity_types": {
                     item["_id"]: {
                         "count": item["count"],
-                        "last_activity": item["last_activity"].isoformat()
+                        "success_count": item["success_count"],
+                        "success_rate": round((item["success_count"] / item["count"]) * 100, 2) if item["count"] > 0 else 0,
+                        "last_activity": item["last_activity"].isoformat(),
+                        "avg_duration": round(item["avg_duration"], 3) if item["avg_duration"] else None
                     }
                     for item in results
                 },
@@ -200,309 +315,298 @@ class UserActivityRepository:
             return stats
             
         except Exception as e:
-            logger.error(f"활동 통계 조회 실패 (user_id: {user_id}): {e}")
+            logger.error(f"활동 통계 조회 실패: {e}")
             return {}
     
-    async def get_daily_activity_summary(self, user_id: int, days: int = 30) -> List[Dict[str, Any]]:
+    async def get_daily_activity_summary(self, user_id: int = None, days: int = 30) -> List[Dict[str, Any]]:
         """일별 활동 요약"""
         try:
             collection = await self._get_collection()
             
             start_date = datetime.now() - timedelta(days=days)
             
+            # 기본 매치 조건
+            match_stage = {"created_at": {"$gte": start_date}}
+            if user_id:
+                match_stage["user_id"] = user_id
+            
             pipeline = [
-                {
-                    "$match": {
-                        "user_id": user_id,
-                        "timestamp": {"$gte": start_date}
-                    }
-                },
+                {"$match": match_stage},
                 {
                     "$group": {
                         "_id": {
-                            "year": {"$year": "$timestamp"},
-                            "month": {"$month": "$timestamp"},
-                            "day": {"$dayOfMonth": "$timestamp"}
+                            "year": {"$year": "$created_at"},
+                            "month": {"$month": "$created_at"},
+                            "day": {"$dayOfMonth": "$created_at"}
                         },
                         "total_activities": {"$sum": 1},
                         "activity_types": {"$addToSet": "$activity_type"},
-                        "first_activity": {"$min": "$timestamp"},
-                        "last_activity": {"$max": "$timestamp"}
+                        "first_activity": {"$min": "$created_at"},
+                        "last_activity": {"$max": "$created_at"},
+                        "success_count": {
+                            "$sum": {"$cond": [{"$eq": ["$success", True]}, 1, 0]}
+                        },
+                        "unique_sessions": {"$addToSet": "$session_id"},
+                        "avg_duration": {"$avg": "$duration"}
                     }
                 },
-                {
-                    "$sort": {"_id": -1}
-                }
+                {"$sort": {"_id": -1}}
             ]
             
-            results = await collection.aggregate(pipeline).to_list(length=None)
-            
-            # 결과 포맷팅
-            daily_summary = []
-            for item in results:
-                date_obj = datetime(item["_id"]["year"], item["_id"]["month"], item["_id"]["day"])
-                daily_summary.append({
+            results = []
+            async for doc in collection.aggregate(pipeline):
+                date_obj = datetime(doc["_id"]["year"], doc["_id"]["month"], doc["_id"]["day"])
+                
+                # 활성 시간 계산
+                active_duration = 0
+                if doc["first_activity"] and doc["last_activity"]:
+                    active_duration = (doc["last_activity"] - doc["first_activity"]).total_seconds() / 3600
+                
+                results.append({
                     "date": date_obj.strftime("%Y-%m-%d"),
-                    "total_activities": item["total_activities"],
-                    "unique_activity_types": len(item["activity_types"]),
-                    "activity_types": item["activity_types"],
-                    "first_activity": item["first_activity"].isoformat(),
-                    "last_activity": item["last_activity"].isoformat(),
-                    "active_duration_hours": (
-                        item["last_activity"] - item["first_activity"]
-                    ).total_seconds() / 3600
+                    "total_activities": doc["total_activities"],
+                    "success_count": doc["success_count"],
+                    "success_rate": round((doc["success_count"] / doc["total_activities"]) * 100, 2) if doc["total_activities"] > 0 else 0,
+                    "unique_activity_types": len(doc["activity_types"]),
+                    "activity_types": doc["activity_types"],
+                    "unique_sessions": len([s for s in doc["unique_sessions"] if s]),
+                    "first_activity": doc["first_activity"].isoformat(),
+                    "last_activity": doc["last_activity"].isoformat(),
+                    "active_duration_hours": round(active_duration, 2),
+                    "avg_duration": round(doc["avg_duration"], 3) if doc["avg_duration"] else None
                 })
             
-            return daily_summary
+            return results
             
         except Exception as e:
-            logger.error(f"일별 활동 요약 조회 실패 (user_id: {user_id}): {e}")
+            logger.error(f"일별 활동 요약 조회 실패: {e}")
             return []
     
-    async def get_activity_patterns(self, user_id: int, days: int = 90) -> Dict[str, Any]:
-        """사용자 활동 패턴 분석"""
+    async def get_activity_patterns(self, user_id: int = None, days: int = 90) -> Dict[str, Any]:
+        """활동 패턴 분석"""
         try:
             collection = await self._get_collection()
             
             start_date = datetime.now() - timedelta(days=days)
             
+            # 기본 매치 조건
+            match_stage = {"created_at": {"$gte": start_date}}
+            if user_id:
+                match_stage["user_id"] = user_id
+            
             # 시간대별 활동 패턴
             hourly_pipeline = [
-                {
-                    "$match": {
-                        "user_id": user_id,
-                        "timestamp": {"$gte": start_date}
-                    }
-                },
+                {"$match": match_stage},
                 {
                     "$group": {
-                        "_id": {"$hour": "$timestamp"},
-                        "count": {"$sum": 1}
+                        "_id": {"$hour": "$created_at"},
+                        "count": {"$sum": 1},
+                        "avg_duration": {"$avg": "$duration"}
                     }
                 },
-                {
-                    "$sort": {"_id": 1}
-                }
+                {"$sort": {"_id": 1}}
             ]
             
             # 요일별 활동 패턴
             daily_pipeline = [
-                {
-                    "$match": {
-                        "user_id": user_id,
-                        "timestamp": {"$gte": start_date}
-                    }
-                },
+                {"$match": match_stage},
                 {
                     "$group": {
-                        "_id": {"$dayOfWeek": "$timestamp"},
-                        "count": {"$sum": 1}
+                        "_id": {"$dayOfWeek": "$created_at"},
+                        "count": {"$sum": 1},
+                        "avg_duration": {"$avg": "$duration"}
                     }
                 },
-                {
-                    "$sort": {"_id": 1}
-                }
+                {"$sort": {"_id": 1}}
+                
             ]
             
-            hourly_results = await collection.aggregate(hourly_pipeline).to_list(length=None)
-            daily_results = await collection.aggregate(daily_pipeline).to_list(length=None)
+            # 활동 타입별 패턴
+            type_pipeline = [
+                {"$match": match_stage},
+                {
+                    "$group": {
+                        "_id": "$activity_type",
+                        "count": {"$sum": 1},
+                        "avg_duration": {"$avg": "$duration"},
+                        "success_rate": {
+                            "$avg": {"$cond": [{"$eq": ["$success", True]}, 1, 0]}
+                        }
+                    }
+                },
+                {"$sort": {"count": -1}}
+            ]
+            
+            hourly_results = []
+            async for doc in collection.aggregate(hourly_pipeline):
+                hourly_results.append(doc)
+            
+            daily_results = []
+            async for doc in collection.aggregate(daily_pipeline):
+                daily_results.append(doc)
+            
+            type_results = []
+            async for doc in collection.aggregate(type_pipeline):
+                type_results.append(doc)
             
             # 패턴 분석
             patterns = {
-                "hourly_distribution": {item["_id"]: item["count"] for item in hourly_results},
-                "daily_distribution": {item["_id"]: item["count"] for item in daily_results},
-                "peak_hours": [],
-                "most_active_days": [],
+                "hourly_distribution": {
+                    str(item["_id"]): {
+                        "count": item["count"],
+                        "avg_duration": round(item["avg_duration"], 3) if item["avg_duration"] else None
+                    }
+                    for item in hourly_results
+                },
+                "daily_distribution": {
+                    str(item["_id"]): {
+                        "count": item["count"],
+                        "avg_duration": round(item["avg_duration"], 3) if item["avg_duration"] else None
+                    }
+                    for item in daily_results
+                },
+                "activity_type_distribution": {
+                    item["_id"]: {
+                        "count": item["count"],
+                        "avg_duration": round(item["avg_duration"], 3) if item["avg_duration"] else None,
+                        "success_rate": round(item["success_rate"] * 100, 2)
+                    }
+                    for item in type_results
+                },
                 "analysis_period": f"{days} days"
             }
             
             # 피크 시간대 찾기
             if hourly_results:
-                sorted_hours = sorted(hourly_results, key=lambda x: x["count"], reverse=True)
-                patterns["peak_hours"] = [item["_id"] for item in sorted_hours[:3]]
+                peak_hour = max(hourly_results, key=lambda x: x["count"])
+                patterns["peak_hour"] = {
+                    "hour": peak_hour["_id"],
+                    "count": peak_hour["count"]
+                }
             
             # 가장 활발한 요일 찾기
             if daily_results:
-                sorted_days = sorted(daily_results, key=lambda x: x["count"], reverse=True)
-                day_names = ["", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-                patterns["most_active_days"] = [
-                    {"day": day_names[item["_id"]], "count": item["count"]} 
-                    for item in sorted_days[:3]
-                ]
+                peak_day = max(daily_results, key=lambda x: x["count"])
+                day_names = ["", "일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"]
+                patterns["most_active_day"] = {
+                    "day": day_names[peak_day["_id"]] if peak_day["_id"] <= 7 else "Unknown",
+                    "count": peak_day["count"]
+                }
             
             return patterns
             
         except Exception as e:
-            logger.error(f"활동 패턴 분석 실패 (user_id: {user_id}): {e}")
+            logger.error(f"활동 패턴 분석 실패: {e}")
             return {}
     
     # ===========================================
-    # 세션 기반 활동 추적
+    # 성능 분석
     # ===========================================
     
-    async def log_session_activity(
-        self, 
-        user_id: int, 
-        session_id: str, 
-        activity_type: str,
-        details: Dict[str, Any] = None
-    ) -> Optional[str]:
-        """세션 기반 활동 로그"""
-        activity_data = {
-            "user_id": user_id,
-            "session_id": session_id,
-            "activity_type": activity_type,
-            "details": details or {},
-            "source": "session"
-        }
-        
-        return await self.log_activity(activity_data)
-    
-    async def get_session_activities(self, session_id: str) -> List[Dict[str, Any]]:
-        """특정 세션의 모든 활동 조회"""
+    async def get_performance_stats(self, user_id: int = None, days: int = 7) -> Dict[str, Any]:
+        """성능 통계"""
         try:
             collection = await self._get_collection()
             
-            query = {"session_id": session_id}
-            cursor = collection.find(query).sort("timestamp", ASCENDING)
-            activities = await cursor.to_list(length=None)
+            start_date = datetime.now() - timedelta(days=days)
             
-            for activity in activities:
-                activity["_id"] = str(activity["_id"])
-            
-            return activities
-            
-        except Exception as e:
-            logger.error(f"세션 활동 조회 실패 (session_id: {session_id}): {e}")
-            return []
-    
-    async def get_session_summary(self, session_id: str) -> Dict[str, Any]:
-        """세션 활동 요약"""
-        try:
-            collection = await self._get_collection()
+            # 기본 매치 조건
+            match_stage = {
+                "created_at": {"$gte": start_date},
+                "duration": {"$exists": True, "$ne": None}
+            }
+            if user_id:
+                match_stage["user_id"] = user_id
             
             pipeline = [
-                {"$match": {"session_id": session_id}},
+                {"$match": match_stage},
                 {
                     "$group": {
                         "_id": None,
+                        "avg_duration": {"$avg": "$duration"},
+                        "min_duration": {"$min": "$duration"},
+                        "max_duration": {"$max": "$duration"},
                         "total_activities": {"$sum": 1},
-                        "activity_types": {"$addToSet": "$activity_type"},
-                        "first_activity": {"$min": "$timestamp"},
-                        "last_activity": {"$max": "$timestamp"},
-                        "user_id": {"$first": "$user_id"}
+                        "slow_activities": {
+                            "$sum": {"$cond": [{"$gt": ["$duration", 5.0]}, 1, 0]}
+                        },
+                        "durations": {"$push": "$duration"}
                     }
                 }
             ]
             
-            results = await collection.aggregate(pipeline).to_list(length=1)
+            result = None
+            async for doc in collection.aggregate(pipeline):
+                result = doc
+                break
             
-            if results:
-                result = results[0]
-                duration = result["last_activity"] - result["first_activity"]
+            if not result:
+                return {}
+            
+            # 백분위수 계산 (간단한 방식)
+            durations = sorted(result["durations"])
+            total_count = len(durations)
+            
+            if total_count > 0:
+                p50_index = int(total_count * 0.5)
+                p95_index = int(total_count * 0.95)
+                p99_index = int(total_count * 0.99)
                 
-                return {
-                    "session_id": session_id,
-                    "user_id": result["user_id"],
+                stats = {
+                    "avg_duration": round(result["avg_duration"], 3),
+                    "min_duration": round(result["min_duration"], 3),
+                    "max_duration": round(result["max_duration"], 3),
+                    "p50_duration": round(durations[p50_index], 3),
+                    "p95_duration": round(durations[p95_index], 3),
+                    "p99_duration": round(durations[p99_index], 3),
                     "total_activities": result["total_activities"],
-                    "unique_activity_types": len(result["activity_types"]),
-                    "activity_types": result["activity_types"],
-                    "session_start": result["first_activity"].isoformat(),
-                    "session_end": result["last_activity"].isoformat(),
-                    "duration_seconds": duration.total_seconds(),
-                    "duration_minutes": round(duration.total_seconds() / 60, 2)
+                    "slow_activities": result["slow_activities"],
+                    "slow_activity_rate": round((result["slow_activities"] / result["total_activities"]) * 100, 2)
                 }
+            else:
+                stats = {}
             
-            return {}
+            return stats
             
         except Exception as e:
-            logger.error(f"세션 요약 조회 실패 (session_id: {session_id}): {e}")
+            logger.error(f"성능 통계 조회 실패: {e}")
             return {}
-    
-    # ===========================================
-    # 특정 활동 타입 처리
-    # ===========================================
-    
-    async def log_page_view(self, user_id: int, page_url: str, session_id: str = None, **kwargs) -> Optional[str]:
-        """페이지 뷰 로그"""
-        activity_data = {
-            "user_id": user_id,
-            "activity_type": "page_view",
-            "page_url": page_url,
-            "session_id": session_id,
-            "details": kwargs
-        }
-        return await self.log_activity(activity_data)
-    
-    async def log_search(self, user_id: int, search_query: str, results_count: int = 0, **kwargs) -> Optional[str]:
-        """검색 활동 로그"""
-        activity_data = {
-            "user_id": user_id,
-            "activity_type": "search",
-            "search_query": search_query,
-            "results_count": results_count,
-            "details": kwargs
-        }
-        return await self.log_activity(activity_data)
-    
-    async def log_api_call(self, user_id: int, endpoint: str, method: str, status_code: int, **kwargs) -> Optional[str]:
-        """API 호출 로그"""
-        activity_data = {
-            "user_id": user_id,
-            "activity_type": "api_call",
-            "endpoint": endpoint,
-            "method": method,
-            "status_code": status_code,
-            "details": kwargs
-        }
-        return await self.log_activity(activity_data)
-    
-    async def log_file_download(self, user_id: int, file_name: str, file_size: int = 0, **kwargs) -> Optional[str]:
-        """파일 다운로드 로그"""
-        activity_data = {
-            "user_id": user_id,
-            "activity_type": "file_download",
-            "file_name": file_name,
-            "file_size": file_size,
-            "details": kwargs
-        }
-        return await self.log_activity(activity_data)
     
     # ===========================================
     # 데이터 정리 및 유지보수
     # ===========================================
     
     async def cleanup_old_activities(self, days_old: int = 365) -> int:
-        """오래된 활동 로그 정리"""
+        """오래된 활동 정리"""
         try:
             collection = await self._get_collection()
             
             cutoff_date = datetime.now() - timedelta(days=days_old)
             
             result = await collection.delete_many({
-                "timestamp": {"$lt": cutoff_date}
+                "created_at": {"$lt": cutoff_date}
             })
             
             deleted_count = result.deleted_count
-            logger.info(f"오래된 활동 로그 {deleted_count}개 삭제")
+            logger.info(f"오래된 활동 {deleted_count}개 삭제")
             
             return deleted_count
             
         except Exception as e:
-            logger.error(f"활동 로그 정리 실패: {e}")
+            logger.error(f"활동 정리 실패: {e}")
             return 0
     
     async def get_collection_stats(self) -> Dict[str, Any]:
-        """컬렉션 통계 조회"""
+        """컬렉션 통계"""
         try:
             collection = await self._get_collection()
             
             # 컬렉션 통계
-            stats = await self.db.command("collStats", self.collection_name)
+            stats_result = await self.db.command("collStats", self.collection_name)
             
             # 최근 활동 통계
             recent_count = await collection.count_documents({
-                "timestamp": {"$gte": datetime.now() - timedelta(days=7)}
+                "created_at": {"$gte": datetime.now() - timedelta(days=7)}
             })
             
             # 사용자별 활동 수 통계
@@ -522,15 +626,19 @@ class UserActivityRepository:
                 }
             ]
             
-            user_stats = await collection.aggregate(user_pipeline).to_list(length=1)
+            user_stats_result = None
+            async for doc in collection.aggregate(user_pipeline):
+                user_stats_result = doc
+                break
             
             return {
-                "total_documents": stats.get("count", 0),
-                "storage_size": stats.get("storageSize", 0),
-                "avg_document_size": stats.get("avgObjSize", 0),
+                "total_documents": stats_result.get("count", 0),
+                "storage_size": stats_result.get("storageSize", 0),
+                "avg_document_size": stats_result.get("avgObjSize", 0),
+                "index_size": stats_result.get("totalIndexSize", 0),
                 "recent_activities_7days": recent_count,
-                "total_users_with_activities": user_stats[0]["total_users"] if user_stats else 0,
-                "avg_activities_per_user": round(user_stats[0]["avg_activities_per_user"], 2) if user_stats else 0
+                "total_users_with_activities": user_stats_result["total_users"] if user_stats_result else 0,
+                "avg_activities_per_user": round(user_stats_result["avg_activities_per_user"], 2) if user_stats_result else 0
             }
             
         except Exception as e:
@@ -538,154 +646,56 @@ class UserActivityRepository:
             return {}
     
     # ===========================================
-    # 고급 쿼리 및 분석
+    # 일괄 작업
     # ===========================================
     
-    async def get_user_journey(self, user_id: int, session_id: str = None, hours: int = 24) -> List[Dict[str, Any]]:
-        """사용자 여정 추적"""
+    async def bulk_create_activities(self, activities: List[UserActivityCreateRequest]) -> List[str]:
+        """활동 일괄 생성"""
         try:
             collection = await self._get_collection()
             
-            query = {
-                "user_id": user_id,
-                "timestamp": {"$gte": datetime.now() - timedelta(hours=hours)}
-            }
+            # UserActivity 모델로 변환
+            activity_docs = []
+            for request in activities:
+                request.validate_required_fields_by_type()
+                activity = UserActivity(**request.to_activity_dict())
+                activity_docs.append(activity.to_mongo_dict())
             
-            if session_id:
-                query["session_id"] = session_id
+            result = await collection.insert_many(activity_docs)
+            inserted_ids = [str(oid) for oid in result.inserted_ids]
             
-            # 시간 순으로 정렬하여 여정 추적
-            cursor = collection.find(query).sort("timestamp", ASCENDING)
-            activities = await cursor.to_list(length=None)
-            
-            # 여정 분석
-            journey = []
-            for i, activity in enumerate(activities):
-                activity["_id"] = str(activity["_id"])
-                activity["step_number"] = i + 1
-                
-                # 다음 활동과의 시간 간격 계산
-                if i < len(activities) - 1:
-                    next_activity = activities[i + 1]
-                    time_gap = (next_activity["timestamp"] - activity["timestamp"]).total_seconds()
-                    activity["time_to_next_action"] = time_gap
-                
-                journey.append(activity)
-            
-            return journey
+            logger.info(f"활동 일괄 생성 완료: {len(inserted_ids)}개")
+            return inserted_ids
             
         except Exception as e:
-            logger.error(f"사용자 여정 추적 실패 (user_id: {user_id}): {e}")
+            logger.error(f"활동 일괄 생성 실패: {e}")
             return []
     
-    async def find_similar_users(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-        """유사한 활동 패턴을 가진 사용자 찾기"""
+    async def get_activities_by_ids(self, activity_ids: List[str]) -> List[UserActivity]:
+        """여러 ID로 활동 조회"""
         try:
             collection = await self._get_collection()
             
-            # 대상 사용자의 활동 패턴 조회
-            target_activities = await self.get_activity_stats(user_id, days=30)
-            target_types = set(target_activities.get("activity_types", {}).keys())
+            cursor = collection.find({"_id": {"$in": activity_ids}})
             
-            if not target_types:
-                return []
+            activities = []
+            async for doc in cursor:
+                activities.append(UserActivity.from_mongo(doc))
             
-            # 유사한 활동을 하는 다른 사용자 찾기
-            pipeline = [
-                {
-                    "$match": {
-                        "user_id": {"$ne": user_id},
-                        "activity_type": {"$in": list(target_types)},
-                        "timestamp": {"$gte": datetime.now() - timedelta(days=30)}
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": "$user_id",
-                        "common_activities": {"$addToSet": "$activity_type"},
-                        "total_activities": {"$sum": 1}
-                    }
-                },
-                {
-                    "$addFields": {
-                        "similarity_score": {
-                            "$divide": [
-                                {"$size": {"$setIntersection": ["$common_activities", list(target_types)]}},
-                                {"$size": {"$setUnion": ["$common_activities", list(target_types)]}}
-                            ]
-                        }
-                    }
-                },
-                {
-                    "$match": {
-                        "similarity_score": {"$gte": 0.3}  # 30% 이상 유사도
-                    }
-                },
-                {
-                    "$sort": {"similarity_score": -1}
-                },
-                {
-                    "$limit": limit
-                }
-            ]
-            
-            results = await collection.aggregate(pipeline).to_list(length=limit)
-            
-            return results
+            return activities
             
         except Exception as e:
-            logger.error(f"유사 사용자 찾기 실패 (user_id: {user_id}): {e}")
+            logger.error(f"활동 일괄 조회 실패: {e}")
             return []
     
     # ===========================================
-    # 실시간 활동 추적
+    # 헬퍼 메서드
     # ===========================================
     
-    async def get_active_users(self, minutes: int = 30) -> List[int]:
-        """최근 활동한 사용자 목록"""
-        try:
-            collection = await self._get_collection()
-            
-            cutoff_time = datetime.now() - timedelta(minutes=minutes)
-            
-            pipeline = [
-                {
-                    "$match": {
-                        "timestamp": {"$gte": cutoff_time}
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": "$user_id",
-                        "last_activity": {"$max": "$timestamp"}
-                    }
-                },
-                {
-                    "$sort": {"last_activity": -1}
-                }
-            ]
-            
-            results = await collection.aggregate(pipeline).to_list(length=None)
-            
-            return [result["_id"] for result in results]
-            
-        except Exception as e:
-            logger.error(f"활성 사용자 조회 실패: {e}")
-            return []
-    
-    async def get_real_time_activity_count(self, minutes: int = 5) -> int:
-        """실시간 활동 수 조회"""
-        try:
-            collection = await self._get_collection()
-            
-            cutoff_time = datetime.now() - timedelta(minutes=minutes)
-            
-            count = await collection.count_documents({
-                "timestamp": {"$gte": cutoff_time}
-            })
-            
-            return count
-            
-        except Exception as e:
-            logger.error(f"실시간 활동 수 조회 실패: {e}")
-            return 0
+    def _convert_to_user_activity_responses(self, activities: List[UserActivity]) -> List[UserActivityResponse]:
+        """UserActivity를 UserActivityResponse로 변환"""
+        responses = []
+        for activity in activities:
+            response_data = activity.to_user_dict()
+            responses.append(UserActivityResponse(**response_data))
+        return responses
