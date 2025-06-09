@@ -27,16 +27,10 @@ cluster.initial_master_nodes: ["fastapi-node-1"]
 # 메모리 및 성능 설정
 # ==========================================
 bootstrap.memory_lock: false
-indices.memory.index_buffer_size: 20%
-indices.memory.min_index_buffer_size: 48mb
 
-# ==========================================
-# 인덱스 기본 설정
-# ==========================================
-index:
-  number_of_shards: 1
-  number_of_replicas: 0
-  max_result_window: 50000
+# ❌ index-level 설정은 제거
+# indices.memory.index_buffer_size: 20%
+# indices.memory.min_index_buffer_size: 48mb
 
 # ==========================================
 # 로깅 설정
@@ -74,24 +68,13 @@ thread_pool.search.size: 4
 thread_pool.search.queue_size: 1000
 thread_pool.index.size: 4
 thread_pool.index.queue_size: 200
+# ❌ 압축 및 검색 관련 index-level 설정 제거
+# index.codec: best_compression
+# search.max_buckets: 65536
+# indices.query.bool.max_clause_count: 4096
 
 # ==========================================
-# 압축 설정
-# ==========================================
-index.codec: best_compression
-
-# ==========================================
-# 검색 설정
-# ==========================================
-search.max_buckets: 65536
-indices.query.bool.max_clause_count: 4096
-# ==========================================
-# 노리 분석기 관련 설정
-# ==========================================
-# 노리 분석기는 플러그인으로 설치되며,
-# 실제 분석기 설정은 인덱스 생성 시 매핑에서 정의합니다.
-#
-# 예시 매핑 (FastAPI 애플리케이션에서 생성):
+# 노리 분석기 관련 설정 주석 (실제 설정은 매핑 시 적용)
 #
 # PUT /trademarks
 # {
