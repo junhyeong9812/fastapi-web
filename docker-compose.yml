@@ -1,5 +1,5 @@
 # docker-compose.yml
-# 데이터베이스만 구동하는 메인 Docker Compose 파일
+# 데이터베이스 및 검색엔진 통합 Docker Compose 파일 (업데이트된 버전)
 
 version: "3.8"
 
@@ -62,7 +62,6 @@ services:
       - mongodb_data:/data/db
       - mongodb_config:/data/configdb
       - mongodb_logs:/var/log/mongodb
-      - ./docker/mongodb/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     ports:
       - "27017:27017"
     networks:
@@ -76,7 +75,7 @@ services:
       start_period: 60s
 
   # ==========================================
-  # Elasticsearch (검색 엔진)
+  # Elasticsearch 8.15.3 (검색 엔진)
   # ==========================================
   elasticsearch:
     build:
@@ -87,10 +86,14 @@ services:
       - discovery.type=single-node
       - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
       - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
       - xpack.monitoring.collection.enabled=false
-      - cluster.name=fastapi-es-cluster
-      - node.name=fastapi-es-node
-      - bootstrap.memory_lock=true
+      - cluster.name=fastapi-elasticsearch-cluster
+      - node.name=fastapi-node-1
+      - bootstrap.memory_lock=false
+      - ELASTIC_PASSWORD=fastapi_elastic_2024
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
       - elasticsearch_logs:/usr/share/elasticsearch/logs
@@ -120,7 +123,7 @@ services:
       start_period: 60s
 
   # ==========================================
-  # Kibana (Elasticsearch 대시보드)
+  # Kibana 8.15.3 (Elasticsearch 대시보드)
   # ==========================================
   kibana:
     build:
@@ -129,9 +132,15 @@ services:
     container_name: fastapi-kibana
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=elastic
+      - ELASTICSEARCH_PASSWORD=fastapi_elastic_2024
+      - ELASTICSEARCH_SSL_VERIFICATIONMODE=none
       - SERVER_NAME=fastapi-kibana
       - SERVER_HOST=0.0.0.0
       - I18N_LOCALE=ko-KR
+      - XPACK_SECURITY_ENABLED=false
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=something_at_least_32_characters_long_for_encryption
+      - XPACK_REPORTING_ENCRYPTIONKEY=something_at_least_32_characters_long_for_reporting
     volumes:
       - kibana_data:/usr/share/kibana/data
       - kibana_logs:/usr/share/kibana/logs

@@ -1,14 +1,12 @@
 # docker/elasticsearch/elasticsearch.yml
-# Elasticsearch 기본 설정 파일 (노리 분석기는 인덱스 매핑에서 정의)
+# Elasticsearch 8.15.3 설정 파일 (노리 분석기 포함)
 
 # ==========================================
 # 클러스터 설정
 # ==========================================
 cluster.name: "fastapi-elasticsearch-cluster"
 node.name: "fastapi-node-1"
-node.master: true
-node.data: true
-node.ingest: true
+node.roles: [master, data, ingest]
 
 # ==========================================
 # 네트워크 설정
@@ -21,16 +19,11 @@ transport.port: 9300
 # 디스커버리 설정 (단일 노드)
 # ==========================================
 discovery.type: single-node
-cluster.initial_master_nodes: ["fastapi-node-1"]
 
 # ==========================================
 # 메모리 및 성능 설정
 # ==========================================
 bootstrap.memory_lock: false
-
-# ❌ index-level 설정은 제거
-# indices.memory.index_buffer_size: 20%
-# indices.memory.min_index_buffer_size: 48mb
 
 # ==========================================
 # 로깅 설정
@@ -39,9 +32,14 @@ logger.level: INFO
 logger.org.elasticsearch.discovery: WARN
 
 # ==========================================
-# 보안 설정 (개발환경)
+# 보안 설정 (개발환경 - SSL 비활성화)
 # ==========================================
 xpack.security.enabled: false
+xpack.security.enrollment.enabled: false
+xpack.security.http.ssl.enabled: false
+xpack.security.transport.ssl.enabled: false
+
+# 기타 X-Pack 기능 비활성화 (개발환경)
 xpack.monitoring.collection.enabled: false
 xpack.graph.enabled: false
 xpack.watcher.enabled: false
@@ -66,17 +64,39 @@ path.logs: /usr/share/elasticsearch/logs
 # ==========================================
 thread_pool.search.size: 4
 thread_pool.search.queue_size: 1000
-thread_pool.index.size: 4
-thread_pool.index.queue_size: 200
-# ❌ 압축 및 검색 관련 index-level 설정 제거
-# index.codec: best_compression
-# search.max_buckets: 65536
-# indices.query.bool.max_clause_count: 4096
 
 # ==========================================
+# 인덱스 설정 (8.x 호환)
+# ==========================================
+# 8.x에서는 기본적으로 더 나은 압축 제공
+indices.memory.index_buffer_size: 20%
+indices.memory.min_index_buffer_size: 48mb
+
+# ==========================================
+# 검색 성능 최적화
+# ==========================================
+search.max_buckets: 65536
+indices.query.bool.max_clause_count: 4096
+
+# ==========================================
+# 액션 timeout 설정
+# ==========================================
+action.destructive_requires_name: true
+
+# ==========================================
+# 클러스터 설정 업데이트 허용
+# ==========================================
+cluster.routing.allocation.disk.threshold_enabled: true
+cluster.routing.allocation.disk.watermark.low: 90%
+cluster.routing.allocation.disk.watermark.high: 95%
+cluster.routing.allocation.disk.watermark.flood_stage: 97%
+# ==========================================
 # 노리 분석기 관련 설정 주석 (실제 설정은 매핑 시 적용)
+# ==========================================
 #
-# PUT /trademarks
+# 한국어 분석을 위한 노리 분석기 매핑 예제:
+#
+# PUT /products
 # {
 #   "settings": {
 #     "analysis": {
@@ -98,7 +118,8 @@ thread_pool.index.queue_size: 200
 #           "decompound_mode": "mixed",
 #           "user_dictionary_rules": [
 #             "갤럭시,갤럭시,갤럭시,NNG",
-#             "아이폰,아이폰,아이폰,NNG"
+#             "아이폰,아이폰,아이폰,NNG",
+#             "삼성전자,삼성전자,삼성전자,NNG"
 #           ]
 #         }
 #       },
@@ -107,7 +128,8 @@ thread_pool.index.queue_size: 200
 #           "type": "synonym",
 #           "synonyms": [
 #             "스마트폰,휴대폰,핸드폰,폰",
-#             "노트북,랩톱,컴퓨터"
+#             "노트북,랩톱,컴퓨터",
+#             "태블릿,패드"
 #           ]
 #         }
 #       }
@@ -122,12 +144,24 @@ thread_pool.index.queue_size: 200
 #         "fields": {
 #           "keyword": {
 #             "type": "keyword"
+#           },
+#           "suggest": {
+#             "type": "completion"
 #           }
 #         }
 #       },
 #       "product_name_eng": {
 #         "type": "text",
 #         "analyzer": "standard"
+#       },
+#       "category": {
+#         "type": "keyword"
+#       },
+#       "price": {
+#         "type": "integer"
+#       },
+#       "created_at": {
+#         "type": "date"
 #       }
 #     }
 #   }
